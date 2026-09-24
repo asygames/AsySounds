@@ -140,7 +140,12 @@ impl VoiceProcessor {
             } else if self.envelope > open_level {
                 self.gate_open = true;
             }
-            let gate_target = if self.gate_open { 1.0 } else { 0.02 };
+            // The zero-strength preset disables the gate without bypassing other effects.
+            let gate_target = if self.settings.gate_threshold_db <= -80.0 || self.gate_open {
+                1.0
+            } else {
+                0.02
+            };
             let gate_coeff = if gate_target > self.gate_gain {
                 gate_attack
             } else {
@@ -203,6 +208,27 @@ mod tests {
         assert!(samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
         assert!(samples[24_000..].iter().any(|s| s.abs() > 0.05));
     }
+    #[test]
+    fn gate_off_preserves_quiet_voice() {
+        let mut processor = VoiceProcessor::new(
+            48_000,
+            VoiceSettings {
+                gate_threshold_db: -80.0,
+                makeup_db: 0.0,
+                ..VoiceSettings::default()
+            },
+        )
+        .unwrap();
+        let mut samples: Vec<f32> = (0..48_000)
+            .map(|n| 0.01 * (2.0 * PI * 200.0 * n as f32 / 48_000.0).sin())
+            .collect();
+        processor.process_in_place(&mut samples);
+        let late_peak = samples[24_000..]
+            .iter()
+            .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        assert!(late_peak > 0.005, "off must not gate low-level speech");
+    }
+
     #[test]
     fn invalid_controls_do_not_poison_processing() {
         let mut processor = VoiceProcessor::new(

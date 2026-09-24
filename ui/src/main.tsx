@@ -7,6 +7,11 @@ type View = 'Mixer' | 'Devices' | 'Microphone' | 'Settings';
 type Devices = { inputs: string[]; outputs: string[] };
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -48, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
+const defaultNoiseStrength = 55;
+// The current native engine is a noise gate, not an overlapping-noise removal model.
+const gateThresholdForStrength = (strength: number) => strength === 0 ? -80 : -70 + strength * 0.4;
+const strengthForGateThreshold = (threshold: number) => threshold <= -80 ? 0 : Math.max(1, Math.min(100, Math.round((threshold + 70) / 0.4)));
+const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
 type Preview = { running: boolean; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
 const emptyPreview: Preview = { running: false, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
 const channelNames = ['Game', 'Chat', 'Media', 'Aux', 'Microphone'];
@@ -21,6 +26,7 @@ function App() {
   const [output, setOutput] = useState('');
   const [preview, setPreview] = useState<Preview>(emptyPreview);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(defaultVoiceSettings);
+  const [noiseStrength, setNoiseStrength] = useState(defaultNoiseStrength);
   const [bypass, setBypass] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -63,6 +69,13 @@ function App() {
 
   function changeVoiceSetting(key: keyof VoiceSettings, value: number) {
     setVoiceSettings(previous => ({ ...previous, [key]: value }));
+    if (key === 'gate_threshold_db') setNoiseStrength(strengthForGateThreshold(value));
+  }
+
+  function changeNoiseStrength(value: number) {
+    setNoiseStrength(value);
+    setVoiceSettings(previous => ({ ...previous, gate_threshold_db: gateThresholdForStrength(value) }));
+    setBypass(false);
   }
 
   async function togglePreview() {
@@ -91,33 +104,48 @@ function App() {
       <div className="asidefoot">ASYGAMES NETWORK<br/><small>Development preview · 0.1.0</small></div>
     </aside>
     <main>
-      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Test your voice processing with selected devices.' : 'Build your sound around your workflow.'}</p></div><span className="status">● &nbsp; {preview.running ? 'Voice preview active' : 'Development preview'}</span></header>
+      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'One simple control for a cleaner microphone.' : 'Build your sound around your workflow.'}</p></div><span className="status">● &nbsp; {preview.running ? 'Voice preview active' : 'Development preview'}</span></header>
       {message && <div role="alert" className="notice error">{message}</div>}
-      {view === 'Microphone' && <section className="voice-panel">
-        <div className="panel-heading"><div><span className="eyebrow">VOICE LAB</span><h2>Live voice preview</h2><p>High-pass filter, noise gate and compression run in the native audio engine.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>Refresh devices</button></div>
-        <div className="device-grid"><label>Microphone<select value={input} onChange={event => setInput(event.target.value)} disabled={preview.running}><option value="">Select input</option>{devices.inputs.map((name, index) => <option value={name} key={name + index}>{name}</option>)}</select></label><label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">Select headphones</option>{devices.outputs.map((name, index) => <option value={name} key={name + index}>{name}</option>)}</select></label></div>
-        <div className="voice-meter">
-          <div className="meter-label"><span>Input level (before processing)</span><strong>{Math.round(preview.raw_peak * 100)}%</strong></div>
-          <div className="meter-track"><div style={{ width: Math.min(100, preview.raw_peak * 100) + '%' }} /></div>
-          <div className="meter-label second-meter"><span>{bypass ? 'Output level (bypass)' : 'Processed voice level'}</span><strong>{Math.round(preview.peak * 100)}%</strong></div>
-          <div className="meter-track"><div style={{ width: Math.min(100, preview.peak * 100) + '%' }} /></div>
+      {view === 'Microphone' && <section className="voice-panel simple-voice-panel">
+        <div className="panel-heading"><div><span className="eyebrow">MICROPHONE</span><h2>Cleaner voice. One slider.</h2><p>Choose the reduction level and listen to the result.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>Refresh devices</button></div>
+        <div className="device-grid compact-devices">
+          <label>Microphone<select value={input} onChange={event => setInput(event.target.value)} disabled={preview.running}><option value="">Select microphone</option>{devices.inputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
+          <label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">Select headphones</option>{devices.outputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
         </div>
-        <div className="controls-heading"><div><span className="eyebrow">LIVE DSP</span><h3>Microphone processing</h3><p>Changes are applied to the running native audio engine without restarting the devices.</p></div><button className="secondary" onClick={() => { setVoiceSettings(defaultVoiceSettings); setBypass(false); }}>Reset settings</button></div>
-        <div className="voice-controls">
-          {([
-            ['high_pass_hz', 'High-pass filter', 20, 250, 5, 'Hz'],
-            ['gate_threshold_db', 'Noise gate threshold', -80, -20, 1, 'dB'],
-            ['compressor_threshold_db', 'Compressor threshold', -40, -6, 1, 'dB'],
-            ['compressor_ratio', 'Compression ratio', 1, 10, 0.5, ':1'],
-            ['makeup_db', 'Makeup gain', -12, 12, 1, 'dB'],
-          ] as const).map(([key, label, min, max, step, unit]) =>
-            <label className="voice-control" key={key}><span>{label}<strong>{voiceSettings[key]}{unit === ':1' ? unit : ' ' + unit}</strong></span>
-              <input type="range" min={min} max={max} step={step} value={voiceSettings[key]} onChange={event => changeVoiceSetting(key, Number(event.target.value))} aria-label={label}/></label>)}
+        <div className="simple-suppression">
+          <div className="suppression-top"><div><span className="eyebrow">NOISE REDUCTION</span><h3>How much background noise?</h3></div><div className="suppression-value"><strong>{noiseStrength}%</strong><small>{strengthLabel(noiseStrength)}</small></div></div>
+          <input type="range" min="0" max="100" step="1" value={noiseStrength} aria-label="Noise reduction strength" onChange={event => changeNoiseStrength(Number(event.target.value))} style={{ background: `linear-gradient(90deg, #a58aff ${noiseStrength}%, #30364c ${noiseStrength}%)` }}/>
+          <div className="suppression-labels"><span>Off</span><span>Balanced</span><span>Maximum</span></div>
+          <p className="suppression-help">Start near 55%. Raise it if your room is noisy; lower it if quiet words get cut off.</p>
         </div>
-        <label className="bypass-control"><input type="checkbox" checked={bypass} onChange={event => setBypass(event.target.checked)}/><span><strong>Bypass processing (dry microphone)</strong><small>Compare original audio against filtering and compression. Keep headphones on to avoid feedback.</small></span></label>
-        <div className="preview-actions"><button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? 'Stop preview' : 'Start voice preview'}</button><span>Use headphones to avoid feedback. No Windows default device is changed.</span></div>
-        {preview.running && <div className="telemetry"><span>Input {preview.sample_rate.toLocaleString()} Hz</span><span>Output {preview.output_sample_rate.toLocaleString()} Hz</span><span>Buffered: {preview.buffered_ms} ms</span><span>Overflow: {preview.overflow_samples.toLocaleString()}</span><span>Underflow: {preview.underflow_samples.toLocaleString()}</span><span>Device glitches: {preview.device_xruns.toLocaleString()}</span></div>}
-        <p className="limitation">The gate reduces noise between phrases. Noise that overlaps your voice needs a separate suppression model, which is not included yet.</p>
+        <div className="simple-preview">
+          <div className="simple-level"><span>Voice level</span><div className="meter-track"><div style={{width: Math.min(100, preview.peak * 100) + '%'}}/></div></div>
+          <div className="simple-actions">
+            <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? 'Stop listening' : 'Test microphone'}</button>
+            <button className={'compare-button' + (bypass ? ' comparing' : '')} disabled={!preview.running || busy} aria-pressed={bypass} onClick={() => setBypass(current => !current)}>{bypass ? 'Original sound • ON' : 'Compare original sound'}</button>
+          </div>
+          <small className="simple-disclaimer">Use headphones to prevent feedback. Windows audio defaults remain unchanged.</small>
+        </div>
+        <details className="advanced-panel">
+          <summary>Advanced settings <span>Optional</span></summary>
+          <div className="advanced-content">
+            <p>Fine-tune only if you want to. These controls apply to the live preview.</p>
+            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setBypass(false);}}>Reset settings</button></div>
+            <div className="voice-controls">
+              {([
+                ['high_pass_hz', 'High-pass filter', 20, 250, 5, 'Hz'],
+                ['gate_threshold_db', 'Noise gate threshold', -80, -20, 1, 'dB'],
+                ['compressor_threshold_db', 'Compressor threshold', -40, -6, 1, 'dB'],
+                ['compressor_ratio', 'Compression ratio', 1, 10, 0.5, ':1'],
+                ['makeup_db', 'Makeup gain', -12, 12, 1, 'dB'],
+              ] as const).map(([key,label,min,max,step,unit]) =>
+                <label className="voice-control" key={key}><span>{label}<strong>{voiceSettings[key]}{unit === ':1' ? unit : ' ' + unit}</strong></span><input type="range" min={min} max={max} step={step} value={voiceSettings[key]} onChange={event => changeVoiceSetting(key, Number(event.target.value))} aria-label={label}/></label>)}
+            </div>
+            <label className="bypass-control"><input type="checkbox" checked={bypass} onChange={event => setBypass(event.target.checked)}/><span><strong>Bypass all effects</strong><small>Hear the dry microphone while preview is running.</small></span></label>
+            {preview.running && <div className="telemetry"><span>Input {preview.sample_rate.toLocaleString()} Hz</span><span>Output {preview.output_sample_rate.toLocaleString()} Hz</span><span>Buffered: {preview.buffered_ms} ms</span><span>Overflow: {preview.overflow_samples.toLocaleString()}</span><span>Underflow: {preview.underflow_samples.toLocaleString()}</span><span>Device glitches: {preview.device_xruns.toLocaleString()}</span></div>}
+          </div>
+        </details>
+        <p className="limitation">Current prototype: reduces noise between speech segments. Removing keyboard or fan noise while you speak requires the upcoming suppression model.</p>
       </section>}
       {view === 'Devices' && <section className="device-panel"><div className="panel-heading"><div><span className="eyebrow">AVAILABLE HARDWARE</span><h2>Audio devices</h2></div><button className="secondary" onClick={() => void refreshDevices()}>Refresh</button></div><div className="device-grid"><div><h3>Inputs</h3>{devices.inputs.map((name, index) => <div className="device-row" key={name + index}>{name}</div>)}</div><div><h3>Outputs</h3>{devices.outputs.map((name, index) => <div className="device-row" key={name + index}>{name}</div>)}</div></div></section>}
       {view === 'Mixer' && <><div className="notice">Mixer controls are a visual prototype. They do not change Windows volume or Sonar routing yet.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}

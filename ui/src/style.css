@@ -15,3 +15,35 @@
 .bypass-control span{display:grid;gap:6px}
 .bypass-control small{color:#acacc6;font-weight:400;line-height:1.5}
 @media(max-width:760px){.voice-controls{grid-template-columns:1fr}.controls-heading{align-items:flex-start;flex-direction:column}}
+
+/* Simple microphone view: one primary control, technical tuning stays collapsed. */
+.simple-voice-panel{max-width:970px}
+.compact-devices{margin:20px 0 16px}
+.simple-suppression{border:1px solid #554779;background:linear-gradient(135deg,#28203f,#191b2d 72%);border-radius:18px;padding:22px 24px}
+.suppression-top{display:flex;justify-content:space-between;align-items:center;gap:16px}
+.suppression-top h3{font-size:20px;margin:7px 0 0}
+.suppression-value{display:grid;justify-items:end;gap:2px;white-space:nowrap}
+.suppression-value strong{font-size:32px;font-variant-numeric:tabular-nums;color:#ded4ff}
+.suppression-value small{color:#bba9fb;font-size:12px}
+.simple-suppression input[type=range]{appearance:none;-webkit-appearance:none;display:block;width:100%;height:11px;border-radius:100px;margin:24px 0 12px;outline-offset:8px;cursor:pointer}
+.simple-suppression input[type=range]::-webkit-slider-thumb{appearance:none;width:23px;height:23px;border-radius:50%;background:#eee9ff;border:4px solid #a58aff;box-shadow:0 0 0 4px #a58aff24}
+.simple-suppression input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#eee9ff;border:4px solid #a58aff}
+.suppression-labels{display:flex;justify-content:space-between;font-size:12px;color:#adb1cc}
+.suppression-help{font-size:13px;margin:17px 0 0;line-height:1.5}
+.simple-preview{padding:19px 0 0}
+.simple-level{display:grid;grid-template-columns:100px minmax(0,1fr);align-items:center;gap:16px;font-size:13px;color:#c3c7dc}
+.simple-level .meter-track{margin:0;height:12px}
+.simple-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px}
+.simple-actions button{padding:13px 20px}
+.compare-button{border:1px solid #49506b;background:#252a3c;color:#d4d8ec;border-radius:10px}
+.compare-button:disabled{opacity:.42;cursor:not-allowed}
+.compare-button.comparing{background:#554329;border-color:#bb955c;color:#ffdeb4}
+.simple-disclaimer{display:block;color:#8e95af;font-size:12px;margin-top:12px}
+.advanced-panel{margin-top:22px;border-top:1px solid #34394d;padding-top:15px}
+.advanced-panel>summary{cursor:pointer;color:#c1badb;font-size:13px;list-style-position:inside;padding:7px 1px}
+.advanced-panel>summary span{font-size:11px;color:#8d93a8;margin-left:8px}
+.advanced-content{padding-top:6px}
+.advanced-content>p{font-size:12px}
+.advanced-content .controls-heading{margin:16px 0 12px}
+.simple-voice-panel .limitation{margin:14px 0 0;font-size:12px}
+@media(max-width:700px){.simple-suppression{padding:19px 17px}.suppression-top h3{font-size:17px}.suppression-value strong{font-size:27px}.simple-level{grid-template-columns:1fr;gap:7px}.simple-actions button{flex:1}}
