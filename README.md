@@ -7,12 +7,12 @@ AsySounds is a Windows audio application under development. The current version 
 - Rust DSP core: stereo gain/mix, output limiter, high-pass voice filter, hysteresis noise gate, compressor and makeup gain.
 - Opt-in live voice preview CLI: `cargo run --bin voice_monitor -- --list` (or `--formats`), then `cargo run --bin voice_monitor -- "EXACT INPUT NAME" "EXACT OUTPUT NAME" 10`. Select headphones for output. Preview lasts at most 60 seconds and prints buffer overflow/underflow and device glitch counts. Common PCM formats and different input/output rates are converted in the preview; no virtual microphone is present.
 - Read-only Windows endpoint inventory: `cargo run --bin devices`.
-- Tauri/React UI: device list and live voice preview with level and overflow/underflow telemetry; mixer remains visual. Run with `cd ui && npm run tauri dev`.
+- Tauri/React UI: device list, live voice preview, adjustable high-pass/gate/compression/makeup, dry bypass, raw/processed peak meters and buffered/overflow/underflow/device-glitch telemetry. DSP controls update between native audio blocks without restarting the device; mixer remains visual. Run with `cd ui && npm run tauri dev`.
 - Offline DSP throughput check: `cargo run --release --bin voice_bench`. This measures computation only, not device latency.
 
 The voice gate suppresses sound between speech segments. It cannot separate speech from keyboard, music or other noise that occurs **during** speech. That requires a separately measured noise suppression model and a fallback path when it fails.
 
-The preview reports device `Xrun` events separately from its own ring-buffer overflow/underflow. A Bluetooth microphone may keep producing device glitches even when the resampler and app buffers stay healthy; the app must not silently call that stream stable.
+The preview reports device `Xrun` events separately from its own ring-buffer overflow/underflow. Live controls and bypass affect only the selected preview stream; they do not change the Windows microphone signal used by other apps. Settings are currently session-only (not persisted). A Bluetooth microphone may keep producing device glitches even when the resampler and app buffers stay healthy; the app must not silently call that stream stable.
 
 ## Engineering order
 

@@ -32,6 +32,8 @@ fn names(devices: impl Iterator<Item = Device>) -> Vec<String> {
 #[derive(Clone, Debug)]
 pub struct MonitorStats {
     pub peak: f32,
+    pub raw_peak: f32,
+    pub buffered_ms: u32,
     pub overflow_samples: u64,
     pub underflow_samples: u64,
     pub device_xruns: u64,
@@ -43,6 +45,8 @@ pub struct MonitorStats {
 
 struct SharedStats {
     peak_bits: AtomicU32,
+    raw_peak_bits: AtomicU32,
+    buffered_ms: AtomicU32,
     overflows: AtomicU64,
     underflows: AtomicU64,
     device_xruns: AtomicU64,
@@ -50,10 +54,79 @@ struct SharedStats {
     error: Mutex<Option<String>>,
 }
 
+/// Values are published by the UI thread and sampled between audio blocks.
+/// The audio callback never blocks on a UI lock or allocates a settings message.
+struct LiveControls {
+    high_pass_hz: AtomicU32,
+    gate_threshold_db: AtomicU32,
+    compressor_threshold_db: AtomicU32,
+    compressor_ratio: AtomicU32,
+    makeup_db: AtomicU32,
+    bypass: AtomicBool,
+    revision: AtomicU64,
+}
+
+impl LiveControls {
+    fn new(settings: VoiceSettings) -> Self {
+        Self {
+            high_pass_hz: AtomicU32::new(settings.high_pass_hz.to_bits()),
+            gate_threshold_db: AtomicU32::new(settings.gate_threshold_db.to_bits()),
+            compressor_threshold_db: AtomicU32::new(settings.compressor_threshold_db.to_bits()),
+            compressor_ratio: AtomicU32::new(settings.compressor_ratio.to_bits()),
+            makeup_db: AtomicU32::new(settings.makeup_db.to_bits()),
+            bypass: AtomicBool::new(false),
+            revision: AtomicU64::new(2),
+        }
+    }
+
+    fn update(&self, settings: VoiceSettings, bypass: bool) {
+        // Mark the write in progress so the audio thread never accepts a partial snapshot.
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.high_pass_hz
+            .store(settings.high_pass_hz.to_bits(), Ordering::Relaxed);
+        self.gate_threshold_db
+            .store(settings.gate_threshold_db.to_bits(), Ordering::Relaxed);
+        self.compressor_threshold_db.store(
+            settings.compressor_threshold_db.to_bits(),
+            Ordering::Relaxed,
+        );
+        self.compressor_ratio
+            .store(settings.compressor_ratio.to_bits(), Ordering::Relaxed);
+        self.makeup_db
+            .store(settings.makeup_db.to_bits(), Ordering::Relaxed);
+        self.bypass.store(bypass, Ordering::Relaxed);
+        self.revision.fetch_add(1, Ordering::Release);
+    }
+
+    fn changed(&self, seen: &mut u64) -> Option<(VoiceSettings, bool)> {
+        let revision = self.revision.load(Ordering::Acquire);
+        if revision == *seen || !revision.is_multiple_of(2) {
+            return None;
+        }
+        let settings = VoiceSettings {
+            high_pass_hz: f32::from_bits(self.high_pass_hz.load(Ordering::Relaxed)),
+            gate_threshold_db: f32::from_bits(self.gate_threshold_db.load(Ordering::Relaxed)),
+            compressor_threshold_db: f32::from_bits(
+                self.compressor_threshold_db.load(Ordering::Relaxed),
+            ),
+            compressor_ratio: f32::from_bits(self.compressor_ratio.load(Ordering::Relaxed)),
+            makeup_db: f32::from_bits(self.makeup_db.load(Ordering::Relaxed)),
+        };
+        let bypass = self.bypass.load(Ordering::Relaxed);
+        // A concurrent change is retried on the next audio block.
+        if self.revision.load(Ordering::Acquire) != revision {
+            return None;
+        }
+        *seen = revision;
+        Some((settings, bypass))
+    }
+}
+
 pub struct VoiceMonitor {
     input_stream: Stream,
     output_stream: Stream,
     shared: Arc<SharedStats>,
+    controls: Arc<LiveControls>,
     sample_rate: u32,
     output_sample_rate: u32,
 }
@@ -90,8 +163,11 @@ impl VoiceMonitor {
         for _ in 0..rate / 50 {
             let _ = producer.try_push(0.0);
         }
+        let controls = Arc::new(LiveControls::new(settings));
         let shared = Arc::new(SharedStats {
             peak_bits: AtomicU32::new(0),
+            raw_peak_bits: AtomicU32::new(0),
+            buffered_ms: AtomicU32::new(0),
             overflows: AtomicU64::new(0),
             underflows: AtomicU64::new(0),
             device_xruns: AtomicU64::new(0),
@@ -107,8 +183,11 @@ impl VoiceMonitor {
                     channels_in,
                     processor,
                     producer,
-                    Arc::clone(&shared),
-                    Arc::clone(&input_ready),
+                    InputContext {
+                        shared: Arc::clone(&shared),
+                        ready: Arc::clone(&input_ready),
+                        controls: Arc::clone(&controls),
+                    },
                 )
             };
         }
@@ -172,6 +251,7 @@ impl VoiceMonitor {
             input_stream,
             output_stream,
             shared,
+            controls,
             sample_rate: rate,
             output_sample_rate: output_rate,
         })
@@ -180,6 +260,8 @@ impl VoiceMonitor {
     pub fn stats(&self) -> MonitorStats {
         MonitorStats {
             peak: f32::from_bits(self.shared.peak_bits.load(Ordering::Relaxed)),
+            raw_peak: f32::from_bits(self.shared.raw_peak_bits.load(Ordering::Relaxed)),
+            buffered_ms: self.shared.buffered_ms.load(Ordering::Relaxed),
             overflow_samples: self.shared.overflows.load(Ordering::Relaxed),
             underflow_samples: self.shared.underflows.load(Ordering::Relaxed),
             device_xruns: self.shared.device_xruns.load(Ordering::Relaxed),
@@ -195,10 +277,21 @@ impl VoiceMonitor {
         }
     }
 
+    /// Update DSP/bypass while the stream runs, without restarting a device.
+    pub fn update_settings(&self, settings: VoiceSettings, bypass: bool) {
+        self.controls.update(settings, bypass);
+    }
+
     pub fn stop(self) {
         drop(self.input_stream);
         drop(self.output_stream);
     }
+}
+
+struct InputContext {
+    shared: Arc<SharedStats>,
+    ready: Arc<AtomicBool>,
+    controls: Arc<LiveControls>,
 }
 
 fn build_input<T>(
@@ -207,20 +300,33 @@ fn build_input<T>(
     channels: usize,
     mut processor: VoiceProcessor,
     mut producer: HeapProd<f32>,
-    shared: Arc<SharedStats>,
-    ready: Arc<AtomicBool>,
+    context: InputContext,
 ) -> Result<Stream, String>
 where
     T: SizedSample + Copy + Send + 'static,
     f32: FromSample<T>,
 {
+    let InputContext {
+        shared,
+        ready,
+        controls,
+    } = context;
     let error_stats = Arc::clone(&shared);
+    let mut seen_revision = 0;
+    let mut bypass = false;
     device
         .build_input_stream(
             config,
             move |data: &[T], _| {
                 let mut mono = [0.0_f32; 2048];
                 for frames in data.chunks(channels * mono.len()) {
+                    if let Some((settings, next_bypass)) = controls.changed(&mut seen_revision) {
+                        if bypass != next_bypass {
+                            processor.reset();
+                        }
+                        bypass = next_bypass;
+                        processor.set_settings(settings);
+                    }
                     let frame_count = frames.len() / channels;
                     for (dst, frame) in mono[..frame_count]
                         .iter_mut()
@@ -236,7 +342,19 @@ where
                             .sum::<f32>()
                             / channels as f32;
                     }
-                    processor.process_in_place(&mut mono[..frame_count]);
+                    let raw_peak = mono[..frame_count]
+                        .iter()
+                        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+                    shared
+                        .raw_peak_bits
+                        .store(raw_peak.to_bits(), Ordering::Relaxed);
+                    if bypass {
+                        for sample in &mut mono[..frame_count] {
+                            *sample = sample.clamp(-1.0, 1.0);
+                        }
+                    } else {
+                        processor.process_in_place(&mut mono[..frame_count]);
+                    }
                     let mut peak = 0.0_f32;
                     let mut lost = 0_u64;
                     for &sample in &mono[..frame_count] {
@@ -276,6 +394,10 @@ where
             config,
             move |data: &mut [T], _| {
                 let queued = consumer.occupied_len() as f64;
+                shared.buffered_ms.store(
+                    ((queued * 1000.0) / input_rate as f64).round() as u32,
+                    Ordering::Relaxed,
+                );
                 let target = input_rate as f64 * 0.03;
                 let correction = ((queued - target) / input_rate as f64 * 0.1).clamp(-0.003, 0.003);
                 let mut missing = 0_u64;
@@ -321,9 +443,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_controls_publish_new_settings_and_bypass() {
+        let controls = LiveControls::new(VoiceSettings::default());
+        let mut revision = 0;
+        let (_, bypass) = controls.changed(&mut revision).unwrap();
+        assert!(!bypass);
+        assert!(controls.changed(&mut revision).is_none());
+        let new_settings = VoiceSettings {
+            high_pass_hz: 125.0,
+            makeup_db: -3.0,
+            ..VoiceSettings::default()
+        };
+        controls.update(new_settings, true);
+        let (updated, bypass) = controls.changed(&mut revision).unwrap();
+        assert_eq!(updated.high_pass_hz, 125.0);
+        assert_eq!(updated.makeup_db, -3.0);
+        assert!(bypass);
+    }
+
+    #[test]
     fn xrun_is_counted_without_stopping_stream() {
         let stats = SharedStats {
             peak_bits: AtomicU32::new(0),
+            raw_peak_bits: AtomicU32::new(0),
+            buffered_ms: AtomicU32::new(0),
             overflows: AtomicU64::new(0),
             underflows: AtomicU64::new(0),
             device_xruns: AtomicU64::new(0),

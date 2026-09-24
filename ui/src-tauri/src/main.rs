@@ -1,1 +1,3 @@
-fn main() { asysounds_lib::run(); }
+fn main() {
+    asysounds_lib::run();
+}
