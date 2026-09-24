@@ -7,6 +7,7 @@ fn main() {
     let mut denoiser = NeuralSuppressor::new();
     let mut input = [0.0_f32; FRAME_SIZE];
     let mut output = [0.0_f32; FRAME_SIZE];
+    let mut previous_input = [0.0_f32; FRAME_SIZE];
     let mut rng = 0x1234_5678_u32;
     let mut times = Vec::with_capacity(600);
     let mut raw_noise_power = 0.0_f64;
@@ -47,9 +48,12 @@ fn main() {
         }
         times.push(before.elapsed().as_micros() as u64);
         assert!(output.iter().all(|s| s.is_finite()));
-        // Exclude the first frame and the synthetic "speech" intervals.
-        if frame > 2 && !speech && frame % 38 != 0 {
-            raw_noise_power += input
+        // RNNoise output is one frame delayed: compare against the previous input.
+        let previous_index = frame.saturating_sub(1);
+        let previous_speech =
+            (120..210).contains(&previous_index) || (340..430).contains(&previous_index);
+        if frame > 3 && !previous_speech && previous_index % 38 != 0 {
+            raw_noise_power += previous_input
                 .iter()
                 .map(|v| f64::from(*v) * f64::from(*v))
                 .sum::<f64>();
@@ -58,6 +62,7 @@ fn main() {
                 .map(|v| f64::from(*v) * f64::from(*v))
                 .sum::<f64>();
         }
+        previous_input = input;
     }
     times.sort_unstable();
     let total_ms = start.elapsed().as_secs_f64() * 1000.0;

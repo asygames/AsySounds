@@ -8,6 +8,38 @@ type Devices = { inputs: string[]; outputs: string[] };
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
 const defaultNoiseStrength = 55;
+const microphoneStorageKey = 'asysounds:microphone:v1';
+type SavedMicrophone = { input: string; output: string; noiseStrength: number; voiceSettings: VoiceSettings };
+function validControl(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
+}
+function readSavedMicrophone(): SavedMicrophone {
+  const defaults: SavedMicrophone = { input: '', output: '', noiseStrength: defaultNoiseStrength, voiceSettings: defaultVoiceSettings };
+  try {
+    const raw = window.localStorage.getItem(microphoneStorageKey);
+    if (!raw) return defaults;
+    const stored: unknown = JSON.parse(raw);
+    if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return defaults;
+    const candidate = stored as Record<string, unknown>;
+    const voice = typeof candidate.voiceSettings === 'object' && candidate.voiceSettings !== null && !Array.isArray(candidate.voiceSettings)
+      ? candidate.voiceSettings as Record<string, unknown> : {};
+    return {
+      input: typeof candidate.input === 'string' ? candidate.input : '',
+      output: typeof candidate.output === 'string' ? candidate.output : '',
+      noiseStrength: validControl(candidate.noiseStrength, defaultNoiseStrength, 0, 100),
+      voiceSettings: {
+        high_pass_hz: validControl(voice.high_pass_hz, defaultVoiceSettings.high_pass_hz, 20, 250),
+        gate_threshold_db: validControl(voice.gate_threshold_db, defaultVoiceSettings.gate_threshold_db, -80, -20),
+        compressor_threshold_db: validControl(voice.compressor_threshold_db, defaultVoiceSettings.compressor_threshold_db, -40, -6),
+        compressor_ratio: validControl(voice.compressor_ratio, defaultVoiceSettings.compressor_ratio, 1, 10),
+        makeup_db: validControl(voice.makeup_db, defaultVoiceSettings.makeup_db, -12, 12),
+      },
+    };
+  } catch {
+    // Corrupt or inaccessible WebView storage must not prevent startup.
+    return defaults;
+  }
+}
 // Strength controls the local RNNoise neural model, not the legacy gate threshold.
 const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
 type Preview = { running: boolean; neural_enabled: boolean; inference_us: number; voice_probability: number; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
@@ -17,14 +49,15 @@ const channelIcons = ['🎮', '💬', '♫', '◈', '🎙'];
 
 function App() {
   const [view, setView] = useState<View>('Microphone');
+  const [savedMicrophone] = useState(readSavedMicrophone);
   const [levels, setLevels] = useState([78, 65, 90, 72, 85]);
   const [muted, setMuted] = useState<boolean[]>([false, false, false, false, false]);
   const [devices, setDevices] = useState<Devices>({ inputs: [], outputs: [] });
-  const [input, setInput] = useState('');
-  const [output, setOutput] = useState('');
+  const [input, setInput] = useState(savedMicrophone.input);
+  const [output, setOutput] = useState(savedMicrophone.output);
   const [preview, setPreview] = useState<Preview>(emptyPreview);
-  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(defaultVoiceSettings);
-  const [noiseStrength, setNoiseStrength] = useState(defaultNoiseStrength);
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(savedMicrophone.voiceSettings);
+  const [noiseStrength, setNoiseStrength] = useState(savedMicrophone.noiseStrength);
   const [bypass, setBypass] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -38,6 +71,14 @@ function App() {
       setMessage('');
     } catch (error) { setMessage(String(error)); }
   }
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(microphoneStorageKey, JSON.stringify({ input, output, voiceSettings, noiseStrength }));
+    } catch {
+      // Preview remains available even if local persistence is blocked.
+    }
+  }, [input, output, voiceSettings, noiseStrength]);
 
   useEffect(() => {
     void refreshDevices();
@@ -145,7 +186,7 @@ function App() {
       </section>}
       {view === 'Devices' && <section className="device-panel"><div className="panel-heading"><div><span className="eyebrow">AVAILABLE HARDWARE</span><h2>Audio devices</h2></div><button className="secondary" onClick={() => void refreshDevices()}>Refresh</button></div><div className="device-grid"><div><h3>Inputs</h3>{devices.inputs.map((name, index) => <div className="device-row" key={name + index}>{name}</div>)}</div><div><h3>Outputs</h3>{devices.outputs.map((name, index) => <div className="device-row" key={name + index}>{name}</div>)}</div></div></section>}
       {view === 'Mixer' && <><div className="notice">Mixer controls are a visual prototype. They do not change Windows volume or Sonar routing yet.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
-      {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. Persistent mixer routing, virtual channels and profiles are in development.</p></section>}
+      {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. Persistent mixer routing, virtual channels and profiles are in development. Microphone preview preferences are saved locally.</p></section>}
     </main>
   </div>;
 }

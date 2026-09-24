@@ -12,7 +12,7 @@ AsySounds is a Windows audio application under development. The current version 
 
 The older `voice_monitor` CLI retains the original gate/compressor pipeline. The Tauri preview now uses local neural suppression from `nnnoiseless` (RNNoise-derived, BSD-3-Clause). It can reduce overlapping background noise, but loud keyboard impacts, breathing or music may still pass, especially while speaking. A 100% setting is not a promise of complete silence.
 
-The preview reports device `Xrun` events separately from its own ring-buffer overflow/underflow. Live controls and bypass affect only the selected preview stream; they do not change the Windows microphone signal used by other apps. Settings are currently session-only (not persisted). A Bluetooth microphone may keep producing device glitches even when the resampler and app buffers stay healthy; the app must not silently call that stream stable.
+The preview reports device `Xrun` events separately from its own ring-buffer overflow/underflow. Live controls and bypass affect only the selected preview stream; they do not change the Windows microphone signal used by other apps. Microphone device choices, neural strength and Advanced voice controls are saved in the local app WebView storage and restored on launch (if devices are still available); bypass is deliberately session-only. Mixer sliders remain visual and are not persisted. A Bluetooth microphone may keep producing device glitches even when the resampler and app buffers stay healthy; the app must not silently call that stream stable.
 
 ## Engineering order
 
