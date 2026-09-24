@@ -1,10 +1,10 @@
-use asysounds_core::monitor::{VoiceMonitor, list_devices};
+use asysounds_core::neural_monitor::{NeuralVoiceMonitor, list_devices};
 use asysounds_core::voice::VoiceSettings;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::State;
 
-struct PreviewState(Mutex<Option<VoiceMonitor>>);
+struct PreviewState(Mutex<Option<NeuralVoiceMonitor>>);
 
 #[derive(Serialize)]
 struct DeviceList {
@@ -37,6 +37,9 @@ impl From<PreviewSettings> for VoiceSettings {
 #[derive(Serialize)]
 struct PreviewStatus {
     running: bool,
+    neural_enabled: bool,
+    inference_us: u32,
+    voice_probability: f32,
     peak: f32,
     raw_peak: f32,
     buffered_ms: u32,
@@ -64,6 +67,7 @@ fn start_preview(
     output: String,
     settings: PreviewSettings,
     bypass: bool,
+    noise_strength: u8,
     state: State<'_, PreviewState>,
 ) -> Result<(), String> {
     let mut guard = state
@@ -73,8 +77,7 @@ fn start_preview(
     if guard.is_some() {
         return Err("Preview is already running".into());
     }
-    let monitor = VoiceMonitor::start(&input, &output, settings.into())?;
-    monitor.update_settings(settings.into(), bypass);
+    let monitor = NeuralVoiceMonitor::start(&input, &output, settings.into(), noise_strength, bypass)?;
     *guard = Some(monitor);
     Ok(())
 }
@@ -83,6 +86,7 @@ fn start_preview(
 fn update_preview_settings(
     settings: PreviewSettings,
     bypass: bool,
+    noise_strength: u8,
     state: State<'_, PreviewState>,
 ) -> Result<(), String> {
     let guard = state
@@ -90,7 +94,7 @@ fn update_preview_settings(
         .lock()
         .map_err(|_| "Preview state unavailable".to_owned())?;
     if let Some(monitor) = guard.as_ref() {
-        monitor.update_settings(settings.into(), bypass);
+        monitor.update_settings(settings.into(), bypass, noise_strength);
     }
     Ok(())
 }
@@ -119,6 +123,9 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
             let stats = monitor.stats();
             PreviewStatus {
                 running: true,
+                neural_enabled: true,
+                inference_us: monitor.inference_us(),
+                voice_probability: monitor.voice_probability(),
                 peak: stats.peak,
                 raw_peak: stats.raw_peak,
                 buffered_ms: stats.buffered_ms,
@@ -133,6 +140,9 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
         }
         None => PreviewStatus {
             running: false,
+            neural_enabled: false,
+            inference_us: 0,
+            voice_probability: 0.0,
             peak: 0.0,
             raw_peak: 0.0,
             buffered_ms: 0,

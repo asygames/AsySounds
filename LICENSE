@@ -1,0 +1,44 @@
+ASYGAMES SOURCE-AVAILABLE LICENSE v1.0
+Copyright (c) 2026 ASYGAMES. All rights reserved.
+
+This license governs the original AsySounds code and other original materials
+owned by ASYGAMES (the "Software"). It is NOT the GNU GPL and does not grant
+open-source rights.
+
+1. PERMITTED ACCESS
+You may view the source code in its official repository and download and run
+unmodified, officially released builds for your own personal, non-commercial
+use. Viewing the source code does not confer ownership or any additional
+license to use the code. The permissions required by GitHub's Terms of Service
+for a public repository, and rights that cannot lawfully be restricted, remain
+unaffected.
+
+2. RESTRICTIONS
+Without prior written permission from the copyright holder, you may not:
+(a) modify, adapt, translate, or create derivative works of the Software;
+(b) distribute, publish, sublicense, or provide copies of the Software or
+    modified versions, including source code or compiled binaries;
+(c) sell, rent, license for a fee, or otherwise commercially exploit the
+    Software, whether modified or unmodified;
+(d) incorporate the Software into another product, service, or repository.
+
+3. PERMISSION
+Any authorization for the acts above must be obtained in advance, in writing,
+from the copyright holder. No contribution, issue, discussion, or public
+availability of the repository constitutes such permission.
+
+4. THIRD-PARTY COMPONENTS
+This license applies ONLY to material whose rights are held by ASYGAMES.
+Third-party software, dependencies, and their notices retain their own
+licenses and permissions. In particular, the nnnoiseless/RNNoise-derived
+component has its own BSD-style license; see docs/licenses/nnnoiseless-COPYING.
+This license does not restrict rights granted by those third-party licenses.
+
+5. RESERVATION OF RIGHTS AND TERMINATION
+All rights not expressly granted are reserved. Permissions under this license
+terminate automatically upon a violation, subject to applicable law.
+
+6. DISCLAIMER
+TO THE EXTENT PERMITTED BY LAW, THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
+WARRANTIES OF ANY KIND. THE COPYRIGHT HOLDER IS NOT LIABLE FOR DAMAGES ARISING
+FROM USE OF THE SOFTWARE, EXCEPT AS REQUIRED BY APPLICABLE LAW.
