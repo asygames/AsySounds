@@ -47,3 +47,15 @@
 .advanced-content .controls-heading{margin:16px 0 12px}
 .simple-voice-panel .limitation{margin:14px 0 0;font-size:12px}
 @media(max-width:700px){.simple-suppression{padding:19px 17px}.suppression-top h3{font-size:17px}.suppression-value strong{font-size:27px}.simple-level{grid-template-columns:1fr;gap:7px}.simple-actions button{flex:1}}
+
+/* Keep the single-slider workflow and its test button visible at standard laptop heights. */
+.simple-voice-panel{margin-top:19px;padding:22px 25px}
+.simple-voice-panel .panel-heading p{margin:7px 0 0}
+.simple-voice-panel .compact-devices{margin:14px 0 15px}
+.simple-voice-panel .compact-devices select{padding:10px 12px}
+.simple-voice-panel .simple-suppression{padding:17px 20px}
+.simple-voice-panel .simple-suppression input[type=range]{margin:18px 0 9px}
+.simple-voice-panel .suppression-help{margin:10px 0 0}
+.simple-voice-panel .simple-preview{padding-top:14px}
+.simple-voice-panel .simple-actions{margin-top:14px}
+@media(max-width:700px){.simple-voice-panel{padding:18px}}
