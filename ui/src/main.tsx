@@ -9,10 +9,33 @@ type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compress
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
 const defaultNoiseStrength = 55;
 const microphoneStorageKey = 'asysounds:microphone:v1';
+const mixerStorageKey = 'asysounds:mixer:v1';
+const defaultMixerLevels = [78, 65, 90, 72, 85];
+const defaultMixerMuted = [false, false, false, false, false];
 type SavedMicrophone = { input: string; output: string; noiseStrength: number; voiceSettings: VoiceSettings };
+type SavedMixer = { levels: number[]; muted: boolean[] };
 function validControl(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
 }
+function readSavedMixer(): SavedMixer {
+  try {
+    const raw = window.localStorage.getItem(mixerStorageKey);
+    if (!raw) return { levels: defaultMixerLevels, muted: defaultMixerMuted };
+    const stored: unknown = JSON.parse(raw);
+    if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return { levels: defaultMixerLevels, muted: defaultMixerMuted };
+    const candidate = stored as Record<string, unknown>;
+    const levels = Array.isArray(candidate.levels) && candidate.levels.length === defaultMixerLevels.length
+      ? candidate.levels.map((value, index) => validControl(value, defaultMixerLevels[index], 0, 100))
+      : defaultMixerLevels;
+    const muted = Array.isArray(candidate.muted) && candidate.muted.length === defaultMixerMuted.length
+      ? candidate.muted.map((value, index) => typeof value === 'boolean' ? value : defaultMixerMuted[index])
+      : defaultMixerMuted;
+    return { levels, muted };
+  } catch {
+    return { levels: defaultMixerLevels, muted: defaultMixerMuted };
+  }
+}
+
 function readSavedMicrophone(): SavedMicrophone {
   const defaults: SavedMicrophone = { input: '', output: '', noiseStrength: defaultNoiseStrength, voiceSettings: defaultVoiceSettings };
   try {
@@ -50,8 +73,9 @@ const channelIcons = ['🎮', '💬', '♫', '◈', '🎙'];
 function App() {
   const [view, setView] = useState<View>('Microphone');
   const [savedMicrophone] = useState(readSavedMicrophone);
-  const [levels, setLevels] = useState([78, 65, 90, 72, 85]);
-  const [muted, setMuted] = useState<boolean[]>([false, false, false, false, false]);
+  const [savedMixer] = useState(readSavedMixer);
+  const [levels, setLevels] = useState(savedMixer.levels);
+  const [muted, setMuted] = useState<boolean[]>(savedMixer.muted);
   const [devices, setDevices] = useState<Devices>({ inputs: [], outputs: [], default_input: null, default_output: null });
   const [input, setInput] = useState(savedMicrophone.input);
   const [output, setOutput] = useState(savedMicrophone.output);
@@ -84,6 +108,14 @@ function App() {
       // Preview remains available even if local persistence is blocked.
     }
   }, [input, output, voiceSettings, noiseStrength]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(mixerStorageKey, JSON.stringify({ levels, muted }));
+    } catch {
+      // Mixer preview still works even if local persistence is blocked.
+    }
+  }, [levels, muted]);
 
   useEffect(() => {
     void refreshDevices();
@@ -212,7 +244,7 @@ function App() {
         </div>
         <div className="device-footer"><div><strong>Prefer automatic selection?</strong><span>Follow Windows defaults for the next preview; your Windows settings stay untouched.</span></div><button className="secondary" disabled={preview.running || (!input && !output)} onClick={() => {setInput(''); setOutput('');}}>Use Windows defaults</button></div>
       </section>}
-      {view === 'Mixer' && <><div className="notice prototype-notice"><span className="prototype-tag">PREVIEW ONLY</span> Visual mixer prototype · real per-app routing is not connected yet. Your Windows and Sonar volumes stay unchanged.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
+      {view === 'Mixer' && <><div className="notice prototype-notice"><span className="prototype-tag">PREVIEW ONLY</span> Visual mixer prototype · channel levels and mute states are saved locally, but real per-app routing is not connected yet. Your Windows and Sonar volumes stay unchanged.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
       {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. Persistent mixer routing, virtual channels and profiles are in development. Microphone preview preferences are saved locally.</p></section>}
     </main>
   </div>;
