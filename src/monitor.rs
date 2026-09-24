@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 pub struct AudioDevices {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    pub default_input: Option<String>,
+    pub default_output: Option<String>,
 }
 
 pub fn list_devices() -> Result<AudioDevices, String> {
@@ -20,6 +22,12 @@ pub fn list_devices() -> Result<AudioDevices, String> {
     Ok(AudioDevices {
         inputs: names(host.input_devices().map_err(|e| e.to_string())?),
         outputs: names(host.output_devices().map_err(|e| e.to_string())?),
+        default_input: host
+            .default_input_device()
+            .and_then(|d| d.description().ok().map(|n| n.name().to_owned())),
+        default_output: host
+            .default_output_device()
+            .and_then(|d| d.description().ok().map(|n| n.name().to_owned())),
     })
 }
 

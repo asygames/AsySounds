@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import './style.css';
 
 type View = 'Mixer' | 'Devices' | 'Microphone' | 'Settings';
-type Devices = { inputs: string[]; outputs: string[] };
+type Devices = { inputs: string[]; outputs: string[]; default_input: string | null; default_output: string | null };
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
 const defaultNoiseStrength = 55;
@@ -52,7 +52,7 @@ function App() {
   const [savedMicrophone] = useState(readSavedMicrophone);
   const [levels, setLevels] = useState([78, 65, 90, 72, 85]);
   const [muted, setMuted] = useState<boolean[]>([false, false, false, false, false]);
-  const [devices, setDevices] = useState<Devices>({ inputs: [], outputs: [] });
+  const [devices, setDevices] = useState<Devices>({ inputs: [], outputs: [], default_input: null, default_output: null });
   const [input, setInput] = useState(savedMicrophone.input);
   const [output, setOutput] = useState(savedMicrophone.output);
   const [preview, setPreview] = useState<Preview>(emptyPreview);
@@ -61,6 +61,11 @@ function App() {
   const [bypass, setBypass] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+
+  const defaultInput = devices.default_input && devices.inputs.includes(devices.default_input) ? devices.default_input : '';
+  const defaultOutput = devices.default_output && devices.outputs.includes(devices.default_output) ? devices.default_output : '';
+  const selectedInput = input || defaultInput;
+  const selectedOutput = output || defaultOutput;
 
   async function refreshDevices() {
     try {
@@ -122,8 +127,8 @@ function App() {
         await invoke('stop_preview');
         setPreview(emptyPreview);
       } else {
-        if (!input || !output) { setMessage('Select both a microphone and a headphone output.'); return; }
-        await invoke('start_preview', { input, output, settings: voiceSettings, bypass, noiseStrength });
+        if (!selectedInput || !selectedOutput) { setMessage('Connect a microphone and headphone output, or choose devices manually.'); return; }
+        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength });
         setPreview(await invoke<Preview>('preview_status'));
       }
       setMessage('');
@@ -133,21 +138,23 @@ function App() {
 
   return <div className="app">
     <aside>
-      <div className="logo"><span>◉</span> ASY<span>SOUNDS</span></div>
+      <div className="logo"><span className="brand-mark">◉</span> <span className="brand-word">ASY<span>SOUNDS</span></span></div>
+      <div className="sidebar-kicker">YOUR SOUND. YOUR RULES.</div>
       <nav aria-label="Main navigation">{(['Mixer', 'Devices', 'Microphone', 'Settings'] as View[]).map((name, index) =>
         <button key={name} className={'nav ' + (view === name ? 'active' : '')} onClick={() => setView(name)}>
           <span aria-hidden="true">{['◫', '◉', '⌁', '⚙'][index]}</span>{name}
         </button>)}</nav>
-      <div className="asidefoot">ASYGAMES NETWORK<br/><small>Development preview · 0.1.0</small></div>
+      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · Preview 0.1.0</small></div>
     </aside>
     <main>
-      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'AI noise suppression with one simple control.' : 'Build your sound around your workflow.'}</p></div><span className="status">● &nbsp; {preview.running ? 'Voice preview active' : 'Development preview'}</span></header>
+      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'AI noise suppression with one simple control.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? 'LIVE VOICE PREVIEW' : 'LOCAL AUDIO ENGINE'}</span></header>
       {message && <div role="alert" className="notice error">{message}</div>}
       {view === 'Microphone' && <section className="voice-panel simple-voice-panel">
-        <div className="panel-heading"><div><span className="eyebrow">MICROPHONE</span><h2>Cleaner voice. One slider.</h2><p>Choose the reduction level and listen to the result.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>Refresh devices</button></div>
+        <div className="panel-heading"><div><span className="eyebrow">MICROPHONE STUDIO <span className="tiny-live-dot"/></span><h2>Cleaner voice. One slider.</h2><p>Real-time neural processing on your PC. No cloud, no extra accounts.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh devices</button></div>
         <div className="device-grid compact-devices">
-          <label>Microphone<select value={input} onChange={event => setInput(event.target.value)} disabled={preview.running}><option value="">Select microphone</option>{devices.inputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
-          <label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">Select headphones</option>{devices.outputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
+          <label>Microphone<select value={input} onChange={event => setInput(event.target.value)} disabled={preview.running}><option value="">{defaultInput ? 'Windows default · ' + defaultInput : 'No default microphone · choose device'}</option>{devices.inputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
+          <label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">{defaultOutput ? 'Windows default · ' + defaultOutput : 'No default output · choose device'}</option>{devices.outputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
+          <div className="device-hint">Using Windows defaults only selects the current devices for this test. AsySounds does not change your system settings.</div>
         </div>
         <div className="simple-suppression">
           <div className="suppression-top"><div><span className="eyebrow">RNNOISE · LOCAL NEURAL PROCESSING</span><h3>Noise suppression strength</h3></div><div className="suppression-value"><strong>{noiseStrength}%</strong><small>{strengthLabel(noiseStrength)}</small></div></div>
@@ -156,7 +163,10 @@ function App() {
           <p className="suppression-help">Start near 55%. Increase for keyboard, clicks and background sounds; reduce if your voice sounds unnatural.</p>
         </div>
         <div className="simple-preview">
-          <div className="simple-level"><span>Voice level</span><div className="meter-track"><div style={{width: Math.min(100, preview.peak * 100) + '%'}}/></div></div>
+          <div className="signal-head"><span className="eyebrow">LIVE SIGNAL</span><span className="signal-readout">{preview.running ? (Math.round(preview.voice_probability * 100) + '% voice detected') : 'Start a test to see input'}</span></div>
+          <div className="simple-level"><span>Input</span><div className="meter-track"><div style={{width: (preview.running ? Math.min(100, preview.raw_peak * 100) : 0) + '%'}}/></div></div>
+          <div className="simple-level"><span>Processed</span><div className="meter-track processed-track"><div style={{width: (preview.running ? Math.min(100, preview.peak * 100) : 0) + '%'}}/></div></div>
+          <div className="signal-stats"><span><i className={preview.running && !preview.failed ? 'ok-dot' : 'idle-dot'}/>{preview.running ? (preview.failed ? 'Stream issue' : 'Processing locally') : 'Preview inactive'}</span><span>{preview.running ? 'RNNoise ' + preview.inference_us + ' µs / frame' : '48 kHz neural engine'}</span></div>
           <div className="simple-actions">
             <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? 'Stop listening' : 'Test microphone'}</button>
             <button className={'compare-button' + (bypass ? ' comparing' : '')} disabled={!preview.running || busy} aria-pressed={bypass} onClick={() => setBypass(current => !current)}>{bypass ? 'Original sound • ON' : 'Compare original sound'}</button>
@@ -184,8 +194,25 @@ function App() {
         </details>
         <p className="limitation">RNNoise processes audio locally at 48 kHz. Some loud impacts, breathing and typing during speech can still be audible; this preview does not alter Discord, OBS or the Windows default microphone.</p>
       </section>}
-      {view === 'Devices' && <section className="device-panel"><div className="panel-heading"><div><span className="eyebrow">AVAILABLE HARDWARE</span><h2>Audio devices</h2></div><button className="secondary" onClick={() => void refreshDevices()}>Refresh</button></div><div className="device-grid"><div><h3>Inputs</h3>{devices.inputs.map((name, index) => <div className="device-row" key={name + index}>{name}</div>)}</div><div><h3>Outputs</h3>{devices.outputs.map((name, index) => <div className="device-row" key={name + index}>{name}</div>)}</div></div></section>}
-      {view === 'Mixer' && <><div className="notice">Mixer controls are a visual prototype. They do not change Windows volume or Sonar routing yet.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
+      {view === 'Devices' && <section className="device-panel">
+        <div className="panel-heading"><div><span className="eyebrow">CONNECTED AUDIO</span><h2>Your devices, clearly organized.</h2><p>Choose what AsySounds uses for microphone preview without changing Windows or Sonar.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh</button></div>
+        <div className="device-overview">
+          <div className="device-summary"><span className="device-symbol">♩</span><div><small>WINDOWS DEFAULT INPUT</small><strong>{defaultInput || 'Not available'}</strong><span>{devices.inputs.length} input device{devices.inputs.length === 1 ? '' : 's'} detected</span></div></div>
+          <div className="device-summary"><span className="device-symbol">◉</span><div><small>WINDOWS DEFAULT OUTPUT</small><strong>{defaultOutput || 'Not available'}</strong><span>{devices.outputs.length} output device{devices.outputs.length === 1 ? '' : 's'} detected</span></div></div>
+        </div>
+        <div className="device-grid device-lists">
+          <div><h3>Microphones <span className="device-count">{devices.inputs.length}</span></h3>
+            {!devices.inputs.length && <p>No input devices were found. Check your Windows audio connections and refresh.</p>}
+            {devices.inputs.map((name, index) => <div className={'device-row ' + (selectedInput === name ? 'selected-device' : '')} key={name + index}><div className="device-row-info"><strong>{name}</strong><div className="device-tags">{defaultInput === name && <span>WINDOWS DEFAULT</span>}{selectedInput === name && <span>PREVIEW INPUT</span>}</div></div><button className="device-action" disabled={preview.running || input === name} onClick={() => setInput(name)}>{input === name ? 'Selected' : 'Use for preview'}</button></div>)}
+          </div>
+          <div><h3>Playback <span className="device-count">{devices.outputs.length}</span></h3>
+            {!devices.outputs.length && <p>No playback devices were found. Check your headphones and refresh.</p>}
+            {devices.outputs.map((name, index) => <div className={'device-row ' + (selectedOutput === name ? 'selected-device' : '')} key={name + index}><div className="device-row-info"><strong>{name}</strong><div className="device-tags">{defaultOutput === name && <span>WINDOWS DEFAULT</span>}{selectedOutput === name && <span>PREVIEW OUTPUT</span>}</div></div><button className="device-action" disabled={preview.running || output === name} onClick={() => setOutput(name)}>{output === name ? 'Selected' : 'Use for preview'}</button></div>)}
+          </div>
+        </div>
+        <div className="device-footer"><div><strong>Prefer automatic selection?</strong><span>Follow Windows defaults for the next preview; your Windows settings stay untouched.</span></div><button className="secondary" disabled={preview.running || (!input && !output)} onClick={() => {setInput(''); setOutput('');}}>Use Windows defaults</button></div>
+      </section>}
+      {view === 'Mixer' && <><div className="notice prototype-notice"><span className="prototype-tag">PREVIEW ONLY</span> Visual mixer prototype · real per-app routing is not connected yet. Your Windows and Sonar volumes stay unchanged.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
       {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. Persistent mixer routing, virtual channels and profiles are in development. Microphone preview preferences are saved locally.</p></section>}
     </main>
   </div>;

@@ -10,6 +10,8 @@ struct PreviewState(Mutex<Option<NeuralVoiceMonitor>>);
 struct DeviceList {
     inputs: Vec<String>,
     outputs: Vec<String>,
+    default_input: Option<String>,
+    default_output: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -58,6 +60,8 @@ fn audio_devices() -> Result<DeviceList, String> {
     Ok(DeviceList {
         inputs: devices.inputs,
         outputs: devices.outputs,
+        default_input: devices.default_input,
+        default_output: devices.default_output,
     })
 }
 
