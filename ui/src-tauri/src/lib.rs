@@ -84,6 +84,7 @@ struct PreviewStatus {
     neural_enabled: bool,
     inference_us: u32,
     voice_probability: f32,
+    impact_events: u64,
     peak: f32,
     raw_peak: f32,
     buffered_ms: u32,
@@ -114,6 +115,8 @@ fn start_preview(
     settings: PreviewSettings,
     bypass: bool,
     noise_strength: u8,
+    impact_strength: u8,
+    clarity_strength: u8,
     state: State<'_, PreviewState>,
 ) -> Result<(), String> {
     let mut guard = state
@@ -123,8 +126,15 @@ fn start_preview(
     if guard.is_some() {
         return Err("Preview is already running".into());
     }
-    let monitor =
-        NeuralVoiceMonitor::start(&input, &output, settings.into(), noise_strength, bypass)?;
+    let monitor = NeuralVoiceMonitor::start(
+        &input,
+        &output,
+        settings.into(),
+        noise_strength,
+        impact_strength,
+        clarity_strength,
+        bypass,
+    )?;
     *guard = Some(monitor);
     Ok(())
 }
@@ -134,6 +144,8 @@ fn update_preview_settings(
     settings: PreviewSettings,
     bypass: bool,
     noise_strength: u8,
+    impact_strength: u8,
+    clarity_strength: u8,
     state: State<'_, PreviewState>,
 ) -> Result<(), String> {
     let guard = state
@@ -141,7 +153,13 @@ fn update_preview_settings(
         .lock()
         .map_err(|_| "Preview state unavailable".to_owned())?;
     if let Some(monitor) = guard.as_ref() {
-        monitor.update_settings(settings.into(), bypass, noise_strength);
+        monitor.update_settings(
+            settings.into(),
+            bypass,
+            noise_strength,
+            impact_strength,
+            clarity_strength,
+        );
     }
     Ok(())
 }
@@ -173,6 +191,7 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
                 neural_enabled: true,
                 inference_us: monitor.inference_us(),
                 voice_probability: monitor.voice_probability(),
+                impact_events: monitor.impact_events(),
                 peak: stats.peak,
                 raw_peak: stats.raw_peak,
                 buffered_ms: stats.buffered_ms,
@@ -190,6 +209,7 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
             neural_enabled: false,
             inference_us: 0,
             voice_probability: 0.0,
+            impact_events: 0,
             peak: 0.0,
             raw_peak: 0.0,
             buffered_ms: 0,

@@ -1,6 +1,7 @@
 //! Real neural suppression preview. Input/output device callbacks only move samples;
 //! a dedicated bounded worker performs resampling, RNNoise and voice DSP.
 //! No system defaults, Sonar endpoints or virtual devices are modified.
+use crate::clarity::VoiceClarity;
 use crate::monitor::MonitorStats;
 use crate::noise::{FRAME_SIZE, NeuralSuppressor, SAMPLE_RATE};
 use crate::resample::LinearResampler;
@@ -19,10 +20,13 @@ pub use crate::monitor::list_devices;
 struct Controls {
     settings: VoiceSettings,
     strength: u8,
+    impact_strength: u8,
+    clarity_strength: u8,
     bypass: bool,
 }
 
 struct WorkerContext {
+    clarity: VoiceClarity,
     running: Arc<AtomicBool>,
     shared: Arc<Shared>,
     controls: Arc<Mutex<Controls>>,
@@ -37,6 +41,7 @@ struct Shared {
     overflows: AtomicU64,
     underflows: AtomicU64,
     device_xruns: AtomicU64,
+    impact_events: AtomicU64,
     failed: AtomicBool,
     error: Mutex<Option<String>>,
 }
@@ -58,6 +63,8 @@ impl NeuralVoiceMonitor {
         output_name: &str,
         settings: VoiceSettings,
         strength: u8,
+        impact_strength: u8,
+        clarity_strength: u8,
         bypass: bool,
     ) -> Result<Self, String> {
         let host = cpal::default_host();
@@ -85,6 +92,7 @@ impl NeuralVoiceMonitor {
             LinearResampler::new(SAMPLE_RATE, output_rate).map_err(str::to_owned)?;
         let voice = VoiceProcessor::new(SAMPLE_RATE, settings).map_err(str::to_owned)?;
         let noise = NeuralSuppressor::new(); // Model construction is outside callbacks.
+        let clarity = VoiceClarity::new(SAMPLE_RATE);
         let input_rb = HeapRb::<f32>::new(((input_rate as usize) / 4).max(2048));
         let output_rb = HeapRb::<f32>::new((SAMPLE_RATE as usize / 5).max(2048));
         let (input_producer, input_consumer) = input_rb.split();
@@ -102,12 +110,15 @@ impl NeuralVoiceMonitor {
             overflows: AtomicU64::new(0),
             underflows: AtomicU64::new(0),
             device_xruns: AtomicU64::new(0),
+            impact_events: AtomicU64::new(0),
             failed: AtomicBool::new(false),
             error: Mutex::new(None),
         });
         let controls = Arc::new(Mutex::new(Controls {
             settings,
             strength: strength.min(100),
+            impact_strength: impact_strength.min(100),
+            clarity_strength: clarity_strength.min(100),
             bypass,
         }));
         let running = Arc::new(AtomicBool::new(true));
@@ -182,6 +193,7 @@ impl NeuralVoiceMonitor {
                     noise,
                     input_rate,
                     WorkerContext {
+                        clarity,
                         running: worker_running,
                         shared: worker_shared,
                         controls: worker_controls,
@@ -225,12 +237,21 @@ impl NeuralVoiceMonitor {
         })
     }
 
-    pub fn update_settings(&self, settings: VoiceSettings, bypass: bool, strength: u8) {
+    pub fn update_settings(
+        &self,
+        settings: VoiceSettings,
+        bypass: bool,
+        strength: u8,
+        impact_strength: u8,
+        clarity_strength: u8,
+    ) {
         if let Ok(mut guard) = self.controls.lock() {
             *guard = Controls {
                 settings,
                 bypass,
                 strength: strength.min(100),
+                impact_strength: impact_strength.min(100),
+                clarity_strength: clarity_strength.min(100),
             };
         }
     }
@@ -253,6 +274,10 @@ impl NeuralVoiceMonitor {
                 .ok()
                 .and_then(|guard| guard.clone()),
         }
+    }
+
+    pub fn impact_events(&self) -> u64 {
+        self.shared.impact_events.load(Ordering::Relaxed)
     }
 
     pub fn inference_us(&self) -> u32 {
@@ -290,6 +315,7 @@ fn worker_loop(
     context: WorkerContext,
 ) {
     let WorkerContext {
+        mut clarity,
         running,
         shared,
         controls,
@@ -333,15 +359,21 @@ fn worker_loop(
             &frame,
             &mut filtered,
             controls_now.strength,
+            controls_now.impact_strength,
             controls_now.bypass,
         );
+        shared
+            .impact_events
+            .store(noise.impact_events(), Ordering::Relaxed);
         if bypass_previous != controls_now.bypass {
             voice.reset();
+            clarity.reset();
             bypass_previous = controls_now.bypass;
         }
         if !controls_now.bypass {
             voice.set_settings(controls_now.settings);
             voice.process_in_place(&mut filtered);
+            clarity.process_in_place(&mut filtered, controls_now.clarity_strength);
         }
         shared.inference_us.store(
             start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32,

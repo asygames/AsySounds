@@ -8,12 +8,14 @@ type AudioSession = { id: string; pid: number; name: string; volume: number; mut
 type Devices = { inputs: string[]; outputs: string[]; default_input: string | null; default_output: string | null };
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
-const defaultNoiseStrength = 55;
+const defaultNoiseStrength = 65;
+const defaultImpactStrength = 85;
+const defaultClarityStrength = 55;
 const microphoneStorageKey = 'asysounds:microphone:v1';
 const mixerStorageKey = 'asysounds:mixer:v1';
 const defaultMixerLevels = [78, 65, 90, 72, 85];
 const defaultMixerMuted = [false, false, false, false, false];
-type SavedMicrophone = { input: string; output: string; noiseStrength: number; voiceSettings: VoiceSettings };
+type SavedMicrophone = { input: string; output: string; noiseStrength: number; impactStrength: number; clarityStrength: number; voiceSettings: VoiceSettings };
 type SavedMixer = { levels: number[]; muted: boolean[] };
 function validControl(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
@@ -38,7 +40,7 @@ function readSavedMixer(): SavedMixer {
 }
 
 function readSavedMicrophone(): SavedMicrophone {
-  const defaults: SavedMicrophone = { input: '', output: '', noiseStrength: defaultNoiseStrength, voiceSettings: defaultVoiceSettings };
+  const defaults: SavedMicrophone = { input: '', output: '', noiseStrength: defaultNoiseStrength, impactStrength: defaultImpactStrength, clarityStrength: defaultClarityStrength, voiceSettings: defaultVoiceSettings };
   try {
     const raw = window.localStorage.getItem(microphoneStorageKey);
     if (!raw) return defaults;
@@ -51,6 +53,8 @@ function readSavedMicrophone(): SavedMicrophone {
       input: typeof candidate.input === 'string' ? candidate.input : '',
       output: typeof candidate.output === 'string' ? candidate.output : '',
       noiseStrength: validControl(candidate.noiseStrength, defaultNoiseStrength, 0, 100),
+      impactStrength: validControl(candidate.impactStrength, defaultImpactStrength, 0, 100),
+      clarityStrength: validControl(candidate.clarityStrength, defaultClarityStrength, 0, 100),
       voiceSettings: {
         high_pass_hz: validControl(voice.high_pass_hz, defaultVoiceSettings.high_pass_hz, 20, 250),
         gate_threshold_db: validControl(voice.gate_threshold_db, defaultVoiceSettings.gate_threshold_db, -80, -20),
@@ -66,8 +70,8 @@ function readSavedMicrophone(): SavedMicrophone {
 }
 // Strength controls the local RNNoise neural model, not the legacy gate threshold.
 const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
-type Preview = { running: boolean; neural_enabled: boolean; inference_us: number; voice_probability: number; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
-const emptyPreview: Preview = { running: false, neural_enabled: false, inference_us: 0, voice_probability: 0, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
+type Preview = { running: boolean; neural_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
+const emptyPreview: Preview = { running: false, neural_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
 const channelNames = ['Game', 'Chat', 'Media', 'Aux', 'Microphone'];
 const channelIcons = ['🎮', '💬', '♫', '◈', '🎙'];
 
@@ -83,6 +87,8 @@ function App() {
   const [preview, setPreview] = useState<Preview>(emptyPreview);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(savedMicrophone.voiceSettings);
   const [noiseStrength, setNoiseStrength] = useState(savedMicrophone.noiseStrength);
+  const [impactStrength, setImpactStrength] = useState(savedMicrophone.impactStrength);
+  const [clarityStrength, setClarityStrength] = useState(savedMicrophone.clarityStrength);
   const [bypass, setBypass] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -128,11 +134,11 @@ function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(microphoneStorageKey, JSON.stringify({ input, output, voiceSettings, noiseStrength }));
+      window.localStorage.setItem(microphoneStorageKey, JSON.stringify({ input, output, voiceSettings, noiseStrength, impactStrength, clarityStrength }));
     } catch {
       // Preview remains available even if local persistence is blocked.
     }
-  }, [input, output, voiceSettings, noiseStrength]);
+  }, [input, output, voiceSettings, noiseStrength, impactStrength, clarityStrength]);
 
   useEffect(() => {
     try {
@@ -169,11 +175,11 @@ function App() {
   useEffect(() => {
     if (!preview.running) return;
     const timer = window.setTimeout(() => {
-      void invoke('update_preview_settings', { settings: voiceSettings, bypass, noiseStrength })
+      void invoke('update_preview_settings', { settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength })
         .catch(error => setMessage(String(error)));
     }, 90);
     return () => window.clearTimeout(timer);
-  }, [voiceSettings, bypass, noiseStrength, preview.running]);
+  }, [voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength, preview.running]);
 
   function changeVoiceSetting(key: keyof VoiceSettings, value: number) {
     setVoiceSettings(previous => ({ ...previous, [key]: value }));
@@ -192,7 +198,7 @@ function App() {
         setPreview(emptyPreview);
       } else {
         if (!selectedInput || !selectedOutput) { setMessage('Connect a microphone and headphone output, or choose devices manually.'); return; }
-        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength });
+        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength });
         setPreview(await invoke<Preview>('preview_status'));
       }
       setMessage('');
@@ -211,20 +217,20 @@ function App() {
       <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · Preview 0.1.0</small></div>
     </aside>
     <main>
-      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'AI noise suppression with one simple control.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? 'LIVE VOICE PREVIEW' : 'LOCAL AUDIO ENGINE'}</span></header>
+      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Local noise, impact and voice clarity controls.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? 'LIVE VOICE PREVIEW' : 'LOCAL AUDIO ENGINE'}</span></header>
       {message && <div role="alert" className="notice error">{message}</div>}
       {view === 'Microphone' && <section className="voice-panel simple-voice-panel">
-        <div className="panel-heading"><div><span className="eyebrow">MICROPHONE STUDIO <span className="tiny-live-dot"/></span><h2>Cleaner voice. One slider.</h2><p>Real-time neural processing on your PC. No cloud, no extra accounts.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh devices</button></div>
+        <div className="panel-heading"><div><span className="eyebrow">MICROPHONE STUDIO <span className="tiny-live-dot"/></span><h2>Clean voice, fewer distractions.</h2><p>Real-time neural processing on your PC. No cloud, no extra accounts.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh devices</button></div>
         <div className="device-grid compact-devices">
           <label>Microphone<select value={input} onChange={event => setInput(event.target.value)} disabled={preview.running}><option value="">{defaultInput ? 'Windows default · ' + defaultInput : 'No default microphone · choose device'}</option>{devices.inputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
           <label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">{defaultOutput ? 'Windows default · ' + defaultOutput : 'No default output · choose device'}</option>{devices.outputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
           <div className="device-hint">Using Windows defaults only selects the current devices for this test. AsySounds does not change your system settings.</div>
         </div>
         <div className="simple-suppression">
-          <div className="suppression-top"><div><span className="eyebrow">RNNOISE · LOCAL NEURAL PROCESSING</span><h3>Noise suppression strength</h3></div><div className="suppression-value"><strong>{noiseStrength}%</strong><small>{strengthLabel(noiseStrength)}</small></div></div>
+          <div className="suppression-top"><div><span className="eyebrow">RNNOISE · LOCAL NEURAL PROCESSING</span><h3>Neural noise suppression</h3></div><div className="suppression-value"><strong>{noiseStrength}%</strong><small>{strengthLabel(noiseStrength)}</small></div></div>
           <input type="range" min="0" max="100" step="1" value={noiseStrength} aria-label="Noise reduction strength" onChange={event => changeNoiseStrength(Number(event.target.value))} style={{ background: `linear-gradient(90deg, #a58aff ${noiseStrength}%, #30364c ${noiseStrength}%)` }}/>
           <div className="suppression-labels"><span>Off</span><span>Balanced</span><span>Maximum</span></div>
-          <p className="suppression-help">Start near 55%. Increase for keyboard, clicks and background sounds; reduce if your voice sounds unnatural.</p>
+          <p className="suppression-help">Mostly neural processing at the balanced setting. Use the impact filter below for short claps or keyboard strikes. Reduce intensity if syllables sound clipped.</p>
         </div>
         <div className="simple-preview">
           <div className="signal-head"><span className="eyebrow">LIVE SIGNAL</span><span className="signal-readout">{preview.running ? (Math.round(preview.voice_probability * 100) + '% voice detected') : 'Start a test to see input'}</span></div>
@@ -237,11 +243,15 @@ function App() {
           </div>
           <small className="simple-disclaimer">Use headphones to prevent feedback. Windows audio defaults remain unchanged.</small>
         </div>
+        <section className="voice-tuning" aria-label="Voice cleanup and clarity">
+          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">TRANSIENT CONTROL</span><h3>Clap & impact filter</h3></div><strong>{impactStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={impactStrength} aria-label="Clap and impact suppression" onChange={event => { setImpactStrength(Number(event.target.value)); setBypass(false); }}/><small>Reduces isolated claps, clicks and short impacts. During speech it uses gentler reduction to protect words. {preview.running ? "Impacts detected: " + preview.impact_events : ""}</small></div>
+          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); }}/><small>Gentle presence EQ and low-mid cleanup after the neural filter. Lower it if your voice becomes too bright.</small></div>
+        </section>
         <details className="advanced-panel">
           <summary>Advanced settings <span>Optional</span></summary>
           <div className="advanced-content">
             <p>Fine-tune only if you want to. These controls apply to the live preview.</p>
-            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setBypass(false);}}>Reset settings</button></div>
+            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setImpactStrength(defaultImpactStrength); setClarityStrength(defaultClarityStrength); setBypass(false);}}>Reset settings</button></div>
             <div className="voice-controls">
               {([
                 ['high_pass_hz', 'High-pass filter', 20, 250, 5, 'Hz'],
@@ -256,7 +266,7 @@ function App() {
             {preview.running && <div className="telemetry"><span>Input {preview.sample_rate.toLocaleString()} Hz</span><span>Output {preview.output_sample_rate.toLocaleString()} Hz</span><span>Buffered: {preview.buffered_ms} ms</span><span>Overflow: {preview.overflow_samples.toLocaleString()}</span><span>Underflow: {preview.underflow_samples.toLocaleString()}</span><span>Device glitches: {preview.device_xruns.toLocaleString()}</span><span>RNNoise frame: {preview.inference_us} µs / 10,000 µs</span><span>Voice probability: {Math.round(preview.voice_probability * 100)}%</span></div>}
           </div>
         </details>
-        <p className="limitation">RNNoise processes audio locally at 48 kHz. Some loud impacts, breathing and typing during speech can still be audible; this preview does not alter Discord, OBS or the Windows default microphone.</p>
+        <p className="limitation">RNNoise and the impact filter run locally at 48 kHz. Claps during speech may still be audible; this preview does not alter Discord, OBS or the Windows default microphone.</p>
       </section>}
       {view === 'Devices' && <section className="device-panel">
         <div className="panel-heading"><div><span className="eyebrow">CONNECTED AUDIO</span><h2>Your devices, clearly organized.</h2><p>Choose what AsySounds uses for microphone preview without changing Windows or Sonar.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh</button></div>

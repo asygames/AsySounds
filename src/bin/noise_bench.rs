@@ -37,7 +37,7 @@ fn main() {
             *sample = hiss + voice + click;
         }
         let before = Instant::now();
-        let vad = denoiser.process_frame(&input, &mut output, 100, false);
+        let vad = denoiser.process_frame(&input, &mut output, 100, 75, false);
         black_box(vad);
         if speech {
             vad_voice_sum += f64::from(vad);

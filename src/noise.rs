@@ -1,6 +1,7 @@
 //! Local neural noise suppression, derived from RNNoise (nnnoiseless, BSD-3-Clause).
 //! Fixed 480-sample / 48 kHz frames. All model allocation happens before the DSP loop.
 //! The dry path is delayed by one frame to line up with RNNoise's algorithmic latency.
+use crate::impact::ImpactSuppressor;
 use nnnoiseless::DenoiseState;
 
 pub const FRAME_SIZE: usize = DenoiseState::FRAME_SIZE;
@@ -13,6 +14,8 @@ pub struct NeuralSuppressor {
     previous_dry: [f32; FRAME_SIZE],
     primed: bool,
     vad_gain: f32,
+    previous_vad: f32,
+    impact: ImpactSuppressor,
 }
 
 impl NeuralSuppressor {
@@ -24,7 +27,13 @@ impl NeuralSuppressor {
             previous_dry: [0.0; FRAME_SIZE],
             primed: false,
             vad_gain: 1.0,
+            previous_vad: 0.0,
+            impact: ImpactSuppressor::new(),
         }
+    }
+
+    pub fn impact_events(&self) -> u64 {
+        self.impact.events()
     }
 
     /// Denoise one complete frame. Strength mixes time-aligned dry and wet signals.
@@ -35,6 +44,7 @@ impl NeuralSuppressor {
         input: &[f32; FRAME_SIZE],
         output: &mut [f32; FRAME_SIZE],
         strength: u8,
+        impact_strength: u8,
         bypass: bool,
     ) -> f32 {
         for (pcm, sample) in self.input_pcm.iter_mut().zip(input.iter()) {
@@ -49,18 +59,17 @@ impl NeuralSuppressor {
             output.fill(0.0); // Discard RNNoise's first-frame synthesis artefacts.
             self.primed = true;
         } else {
-            let mix = if bypass {
-                0.0
-            } else {
-                f32::from(strength.min(100)) / 100.0
-            };
+            // At the old 55% setting almost half the unprocessed clap leaked through.
+            // Bias the blend toward wet RNNoise, but preserve a true zero/dry bypass.
+            let mix = if bypass { 0.0 } else { wet_mix(strength) };
             // Residual gate only reacts to RNNoise's speech estimate, not raw volume.
             // Moderate settings are deliberately forgiving of quiet speech.
-            let gate_strength = ((mix - 0.45) / 0.55).clamp(0.0, 1.0);
+            let gate_strength =
+                ((f32::from(strength.min(100)) / 100.0 - 0.60) / 0.40).clamp(0.0, 1.0);
             // A stronger setting requires higher speech confidence before opening
             // the residual gate; low-strength settings preserve faint speech.
-            let voice_threshold = 0.30 + 0.35 * gate_strength;
-            let target = if vad >= voice_threshold || mix == 0.0 {
+            let voice_threshold = 0.28 + 0.27 * gate_strength;
+            let target = if self.previous_vad >= voice_threshold || mix == 0.0 {
                 1.0
             } else {
                 1.0 - 0.93 * gate_strength
@@ -76,7 +85,15 @@ impl NeuralSuppressor {
                     .mul_add(gate, 0.0)
                     .clamp(-1.0, 1.0);
             }
+            self.impact.process_frame(
+                &self.previous_dry,
+                output,
+                self.previous_vad,
+                impact_strength,
+                bypass,
+            );
         }
+        self.previous_vad = vad;
         for (dst, sample) in self.previous_dry.iter_mut().zip(input.iter()) {
             *dst = if sample.is_finite() {
                 sample.clamp(-1.0, 1.0)
@@ -85,6 +102,15 @@ impl NeuralSuppressor {
             };
         }
         vad
+    }
+}
+
+fn wet_mix(strength: u8) -> f32 {
+    let x = f32::from(strength.min(100)) / 100.0;
+    if x == 0.0 {
+        0.0
+    } else {
+        (x / 0.65).powf(0.82).min(1.0)
     }
 }
 
@@ -98,6 +124,34 @@ impl Default for NeuralSuppressor {
 mod tests {
     use super::*;
     #[test]
+    fn balanced_strength_is_mostly_neural_not_half_dry() {
+        assert!(wet_mix(55) > 0.85);
+        assert_eq!(wet_mix(0), 0.0);
+        assert_eq!(wet_mix(100), 1.0);
+    }
+    #[test]
+    fn impact_filter_is_independent_of_neural_strength() {
+        let mut denoiser = NeuralSuppressor::new();
+        let mut clap = [0.0; FRAME_SIZE];
+        let mut seed = 0x9AE3_187Du32;
+        for sample in clap.iter_mut().skip(40).take(200) {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *sample = (((seed >> 16) as i32 - 32768) as f32 / 32768.0) * 0.6;
+        }
+        let mut processed = [0.0; FRAME_SIZE];
+        denoiser.process_frame(&clap, &mut processed, 0, 100, false);
+        denoiser.process_frame(&[0.0; FRAME_SIZE], &mut processed, 0, 100, false);
+        let unprocessed_energy: f32 = clap.iter().map(|x| x * x).sum();
+        let processed_energy: f32 = processed.iter().map(|x| x * x).sum();
+        assert!(
+            processed_energy < unprocessed_energy * 0.06,
+            "clap filter must work even when neural setting is zero"
+        );
+        assert_eq!(denoiser.impact_events(), 1);
+    }
+    #[test]
     fn rnnoise_frame_is_ten_milliseconds() {
         assert_eq!(FRAME_SIZE, 480);
         assert_eq!(SAMPLE_RATE, 48_000);
@@ -107,13 +161,13 @@ mod tests {
         let mut denoiser = NeuralSuppressor::new();
         let input = std::array::from_fn(|i| (i as f32 / FRAME_SIZE as f32) * 0.2);
         let mut output = [f32::NAN; FRAME_SIZE];
-        denoiser.process_frame(&input, &mut output, 0, false);
+        denoiser.process_frame(&input, &mut output, 0, 70, false);
         assert!(output.iter().all(|sample| *sample == 0.0));
-        denoiser.process_frame(&[0.0; FRAME_SIZE], &mut output, 0, false);
+        denoiser.process_frame(&[0.0; FRAME_SIZE], &mut output, 0, 70, false);
         assert_eq!(input, output);
-        denoiser.process_frame(&input, &mut output, 100, true);
+        denoiser.process_frame(&input, &mut output, 100, 70, true);
         assert_eq!(output, [0.0; FRAME_SIZE]);
-        denoiser.process_frame(&[0.0; FRAME_SIZE], &mut output, 100, true);
+        denoiser.process_frame(&[0.0; FRAME_SIZE], &mut output, 100, 70, true);
         assert_eq!(input, output);
     }
     #[test]
@@ -125,7 +179,7 @@ mod tests {
         input[2] = 12.0;
         let mut output = [0.0; FRAME_SIZE];
         for _ in 0..8 {
-            let vad = denoiser.process_frame(&input, &mut output, 100, false);
+            let vad = denoiser.process_frame(&input, &mut output, 100, 70, false);
             assert!(vad.is_finite());
             assert!(output.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
         }
