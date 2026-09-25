@@ -173,3 +173,59 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
 .session-level input:disabled{cursor:wait;opacity:.6}
 .session-muted{border-color:#b45a72;background:#793549;color:#fff}
 @media(max-width:850px){.session-row{grid-template-columns:1fr 85px}.session-level{grid-column:1/-1;grid-row:2}}
+
+
+/* Fluid workspace: fit cards to usable content width, not a fixed window size. */
+.app { width:100%; min-width:0; }
+.app > main { container:main-pane / inline-size; min-width:0; width:100%; padding:clamp(16px,2.9vw,38px); }
+.app > aside { width:clamp(178px,19vw,238px); min-width:0; flex-shrink:0; }
+main > header { flex-wrap:wrap; min-width:0; }
+main > header > div { min-width:0; }
+.voice-panel,.device-panel,.simple-voice-panel { width:100%; max-width:none; min-width:0; }
+.simple-voice-panel { display:grid; grid-template-columns:minmax(0,1fr); align-content:start; row-gap:clamp(14px,1.9vw,22px); }
+.simple-voice-panel > * { min-width:0; margin-top:0; }
+.simple-voice-panel .compact-devices { margin:0; gap:clamp(10px,1.3vw,18px); }
+.simple-voice-panel .simple-preview { padding-top:0; align-self:start; }
+.simple-voice-panel .advanced-panel { margin-top:0; }
+.simple-voice-panel .limitation { margin-top:0; }
+.panel-heading { flex-wrap:wrap; }
+.panel-heading > div { min-width:0; flex:1 1 290px; }
+.panel-heading button { flex-shrink:0; }
+.voice-tuning { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,245px),1fr)); gap:clamp(10px,1.4vw,18px); }
+.tuning-card { min-width:0; border:1px solid #494065; border-radius:15px; padding:clamp(15px,1.6vw,20px); background:linear-gradient(145deg,#24243d,#161d30); display:grid; align-content:start; gap:14px; }
+.tuning-head { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+.tuning-head h3 { margin:7px 0 0; font-size:clamp(15px,1.5vw,19px); }
+.tuning-head strong { color:#c9b6ff; font-size:22px; font-variant-numeric:tabular-nums; }
+.tuning-card input[type=range] { min-width:0; width:100%; accent-color:#a58aff; cursor:pointer; }
+.tuning-card small { color:#aeb6ce; line-height:1.5; }
+.mixer { display:flex; flex-wrap:wrap; gap:clamp(10px,1.3vw,17px); }
+.mixer article { flex:1 1 170px; min-width:min(100%,165px); min-height:295px; padding:18px 11px; }
+.mixer .channel-meter { height:clamp(75px,11vh,125px); }
+.session-row { grid-template-columns:minmax(0,1fr) minmax(150px,1.15fr) auto; gap:clamp(10px,1.8vw,20px); }
+.device-overview { grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); }
+.device-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr)); }
+.device-grid .device-hint { grid-column:1/-1; }
+@container main-pane (min-width: 760px) {
+  .simple-voice-panel { grid-template-columns:minmax(0,1.08fr) minmax(0,.92fr); column-gap:clamp(18px,2vw,30px); }
+  .simple-voice-panel > .panel-heading,.simple-voice-panel > .compact-devices,
+  .simple-voice-panel > .voice-tuning,.simple-voice-panel > .advanced-panel,.simple-voice-panel > .limitation { grid-column:1/-1; }
+  .simple-voice-panel > .simple-suppression { grid-column:1; }
+  .simple-voice-panel > .simple-preview { grid-column:2; grid-row:3; }
+}
+@container main-pane (max-width: 680px) {
+  .panel-heading { align-items:stretch; }
+  .panel-heading button { width:100%; }
+  .suppression-top { flex-wrap:wrap; }
+  .session-row { display:grid; grid-template-columns:minmax(0,1fr) auto; }
+  .session-level { grid-column:1/-1; grid-row:2; }
+  .voice-controls { grid-template-columns:1fr; }
+}
+@media (max-width: 780px) {
+  .app { display:block; }
+  .app > aside { width:100%; padding:12px 15px; border-right:0; border-bottom:1px solid #34374a; }
+  .app > aside .logo { margin:0 0 9px; }
+  .app > aside .sidebar-kicker,.app > aside .asidefoot { display:none; }
+  .app > aside nav { display:flex; gap:5px; overflow-x:auto; }
+  .app > aside .nav { flex:1 0 auto; width:auto; padding:10px 12px; white-space:nowrap; }
+}
+@media(prefers-reduced-motion:reduce){.tuning-card,.simple-voice-panel{animation:none;}}

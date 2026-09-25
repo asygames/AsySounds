@@ -1,6 +1,8 @@
 //! Allocation-free, in-place stereo DSP primitives for the AsySounds audio callback.
 //! Control-plane updates should be applied between buffers, not inside the sample loop.
 pub mod audio_sessions;
+pub mod clarity;
+pub mod impact;
 pub mod monitor;
 pub mod neural_monitor;
 pub mod noise;
