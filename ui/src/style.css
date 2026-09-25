@@ -159,3 +159,17 @@ button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visi
 @media(max-width:850px){aside{width:190px;padding:24px 11px}.logo{font-size:16px}.sidebar-kicker{font-size:8px}.device-overview{grid-template-columns:1fr}.device-footer{align-items:flex-start;flex-direction:column}.device-footer button{width:100%}}
 @media(max-width:700px){aside{width:100%}.sidebar-kicker{margin-bottom:14px}.device-grid{grid-template-columns:1fr}.device-row{flex-direction:row;align-items:center}.device-action{width:auto}.status{display:none}.voice-panel,.device-panel{margin-top:17px}.prototype-notice{align-items:flex-start;flex-direction:column}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+
+/* Native Windows audio sessions: genuine shared-mode volume, not virtual routing. */
+.session-panel{max-width:none;margin-top:20px}
+.session-list{display:grid;gap:10px;margin-top:19px}
+.session-row{display:grid;grid-template-columns:minmax(180px,1fr) minmax(180px,1.2fr) 85px;gap:18px;align-items:center;border:1px solid #373e55;border-radius:12px;padding:14px 17px;background:#111829}
+.session-meta{min-width:0;display:grid;gap:5px}
+.session-meta strong{overflow-wrap:anywhere;font-size:13px}
+.session-meta small{color:#8795b1;font-size:11px}
+.session-level{display:grid;gap:9px;font-size:11px;color:#acb9d4}
+.session-level>span{display:flex;justify-content:space-between}
+.session-level input{width:100%;accent-color:#a58aff;cursor:pointer}
+.session-level input:disabled{cursor:wait;opacity:.6}
+.session-muted{border-color:#b45a72;background:#793549;color:#fff}
+@media(max-width:850px){.session-row{grid-template-columns:1fr 85px}.session-level{grid-column:1/-1;grid-row:2}}

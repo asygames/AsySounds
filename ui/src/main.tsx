@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { invoke } from '@tauri-apps/api/core';
 import './style.css';
 
 type View = 'Mixer' | 'Devices' | 'Microphone' | 'Settings';
+type AudioSession = { id: string; pid: number; name: string; volume: number; muted: boolean; active: boolean };
 type Devices = { inputs: string[]; outputs: string[]; default_input: string | null; default_output: string | null };
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
@@ -85,11 +86,35 @@ function App() {
   const [bypass, setBypass] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [sessions, setSessions] = useState<AudioSession[]>([]);
+  const [sessionsBusy, setSessionsBusy] = useState(false);
+  const [sessionsError, setSessionsError] = useState('');
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const editingSessionRef = useRef<string | null>(null);
+  function editSession(id: string | null) { editingSessionRef.current = id; setEditingSessionId(id); }
 
   const defaultInput = devices.default_input && devices.inputs.includes(devices.default_input) ? devices.default_input : '';
   const defaultOutput = devices.default_output && devices.outputs.includes(devices.default_output) ? devices.default_output : '';
   const selectedInput = input || defaultInput;
   const selectedOutput = output || defaultOutput;
+
+  async function refreshSessions() {
+    try {
+      const found = await invoke<AudioSession[]>('audio_sessions');
+      if (!editingSessionRef.current) setSessions(found);
+      setSessionsError('');
+    } catch (error) { setSessionsError(String(error)); }
+  }
+
+  async function changeSession(id: string, update: { volume?: number; muted?: boolean }) {
+    setSessionsBusy(true);
+    try {
+      await invoke('update_audio_session', { id, ...update });
+      editSession(null);
+      await refreshSessions();
+    } catch (error) { editSession(null); setSessionsError(String(error)); await refreshSessions(); }
+    finally { setSessionsBusy(false); }
+  }
 
   async function refreshDevices() {
     try {
@@ -121,6 +146,13 @@ function App() {
     void refreshDevices();
     void invoke<Preview>('preview_status').then(setPreview).catch(() => {});
   }, []);
+  useEffect(() => {
+    if (view !== 'Mixer' || sessionsBusy || editingSessionId) return;
+    void refreshSessions();
+    const timer = window.setInterval(() => { if (!editingSessionRef.current) void refreshSessions(); }, 2500);
+    return () => window.clearInterval(timer);
+  }, [view, sessionsBusy, editingSessionId]);
+
   useEffect(() => {
     if (!preview.running) return;
     const timer = window.setInterval(async () => {
@@ -244,7 +276,18 @@ function App() {
         </div>
         <div className="device-footer"><div><strong>Prefer automatic selection?</strong><span>Follow Windows defaults for the next preview; your Windows settings stay untouched.</span></div><button className="secondary" disabled={preview.running || (!input && !output)} onClick={() => {setInput(''); setOutput('');}}>Use Windows defaults</button></div>
       </section>}
-      {view === 'Mixer' && <><div className="notice prototype-notice"><span className="prototype-tag">PREVIEW ONLY</span> Visual mixer prototype · channel levels and mute states are saved locally, but real per-app routing is not connected yet. Your Windows and Sonar volumes stay unchanged.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
+      {view === 'Mixer' && <><div className="notice prototype-notice"><span className="prototype-tag">PREVIEW ONLY</span> Visual mixer prototype · channel levels and mute states are saved locally, but real per-app routing is not connected yet. The preview channels do not change Windows audio; the live session controls below do.</div><section className="mixer">{channelNames.map((name, index) => <article key={name}><div className="channelIcon">{channelIcons[index]}</div><h2>{name}</h2><div className="channel-meter"><div style={{ height: levels[index] + '%' }} /></div><input aria-label={name + ' volume preview'} type="range" min="0" max="100" value={levels[index]} onChange={event => setLevels(previous => previous.map((value, at) => at === index ? Number(event.target.value) : value))}/><strong>{levels[index]}%</strong><button className={muted[index] ? 'muted' : ''} onClick={() => setMuted(previous => previous.map((value, at) => at === index ? !value : value))}>{muted[index] ? 'Unmute' : 'Mute'}</button></article>)}</section></>}
+      {view === 'Mixer' && <section className="device-panel session-panel">
+        <div className="panel-heading"><div><span className="eyebrow">WINDOWS CORE AUDIO · DEFAULT PLAYBACK</span><h2>Live application sessions</h2><p>These controls change the actual Windows session volume on the current default playback device. They do not route apps to Game/Chat channels or change your default output.</p></div><button className="secondary" onClick={() => void refreshSessions()} disabled={sessionsBusy}>↻ Refresh sessions</button></div>
+        {sessionsError && <div role="alert" className="notice error">{sessionsError}</div>}
+        {!sessions.length && !sessionsError && <p>No playback sessions detected on the default output. Start audio in an application and refresh.</p>}
+        <div className="session-list">{sessions.map(session => <div className="session-row" key={session.id}>
+          <div className="session-meta"><strong>{session.name}</strong><small>PID {session.pid} · {session.active ? 'Active' : 'Inactive'} · Windows session</small></div>
+          <label className="session-level"><span>Volume <strong>{Math.round(session.volume * 100)}%</strong></span><input type="range" min="0" max="100" step="1" value={Math.round(session.volume * 100)} disabled={sessionsBusy} aria-label={session.name + ' Windows session volume'} onFocus={() => editSession(session.id)} onPointerDown={() => editSession(session.id)} onChange={event => setSessions(previous => previous.map(item => item.id === session.id ? { ...item, volume: Number(event.target.value) / 100 } : item))} onPointerUp={event => void changeSession(session.id, { volume: Number(event.currentTarget.value) / 100 })} onPointerCancel={() => editSession(null)} onBlur={event => { editSession(null); void changeSession(session.id, { volume: Number(event.currentTarget.value) / 100 }); }} onKeyUp={event => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) void changeSession(session.id, { volume: Number(event.currentTarget.value) / 100 }); }}/></label>
+          <button className={'device-action ' + (session.muted ? 'session-muted' : '')} disabled={sessionsBusy} onClick={() => void changeSession(session.id, { muted: !session.muted })}>{session.muted ? 'Unmute' : 'Mute'}</button>
+        </div>)}</div>
+        <small className="simple-disclaimer">Windows session volumes may also change in Volume Mixer or another application. This is real volume control, not independent virtual audio routing.</small>
+      </section>}
       {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. Persistent mixer routing, virtual channels and profiles are in development. Microphone preview preferences are saved locally.</p></section>}
     </main>
   </div>;

@@ -1,3 +1,4 @@
+use asysounds_core::audio_sessions::{list_audio_sessions, set_audio_session};
 use asysounds_core::neural_monitor::{NeuralVoiceMonitor, list_devices};
 use asysounds_core::voice::VoiceSettings;
 use serde::{Deserialize, Serialize};
@@ -5,6 +6,47 @@ use std::sync::Mutex;
 use tauri::State;
 
 struct PreviewState(Mutex<Option<NeuralVoiceMonitor>>);
+
+#[derive(Serialize)]
+struct SessionInfo {
+    id: String,
+    pid: u32,
+    name: String,
+    volume: f32,
+    muted: bool,
+    active: bool,
+}
+
+// Core Audio enumeration can block. Keep COM work off the WebView event loop.
+#[tauri::command]
+async fn audio_sessions() -> Result<Vec<SessionInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        Ok(list_audio_sessions()?
+            .into_iter()
+            .map(|s| SessionInfo {
+                id: s.id,
+                pid: s.pid,
+                name: s.name,
+                volume: s.volume,
+                muted: s.muted,
+                active: s.active,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("Audio session worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn update_audio_session(
+    id: String,
+    volume: Option<f32>,
+    muted: Option<bool>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_audio_session(&id, volume, muted))
+        .await
+        .map_err(|e| format!("Audio session worker failed: {e}"))?
+}
 
 #[derive(Serialize)]
 struct DeviceList {
@@ -81,7 +123,8 @@ fn start_preview(
     if guard.is_some() {
         return Err("Preview is already running".into());
     }
-    let monitor = NeuralVoiceMonitor::start(&input, &output, settings.into(), noise_strength, bypass)?;
+    let monitor =
+        NeuralVoiceMonitor::start(&input, &output, settings.into(), noise_strength, bypass)?;
     *guard = Some(monitor);
     Ok(())
 }
@@ -167,6 +210,8 @@ pub fn run() {
         .manage(PreviewState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             audio_devices,
+            audio_sessions,
+            update_audio_session,
             start_preview,
             update_preview_settings,
             stop_preview,
