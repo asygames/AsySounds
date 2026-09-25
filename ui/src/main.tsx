@@ -90,6 +90,8 @@ function App() {
   const [impactStrength, setImpactStrength] = useState(savedMicrophone.impactStrength);
   const [clarityStrength, setClarityStrength] = useState(savedMicrophone.clarityStrength);
   const [bypass, setBypass] = useState(false);
+  // A/B comparison disables only the presence EQ, not RNNoise or impact suppression.
+  const [clarityCompareOff, setClarityCompareOff] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [sessions, setSessions] = useState<AudioSession[]>([]);
@@ -175,11 +177,11 @@ function App() {
   useEffect(() => {
     if (!preview.running) return;
     const timer = window.setTimeout(() => {
-      void invoke('update_preview_settings', { settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength })
+      void invoke('update_preview_settings', { settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength: clarityCompareOff ? 0 : clarityStrength })
         .catch(error => setMessage(String(error)));
     }, 90);
     return () => window.clearTimeout(timer);
-  }, [voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength, preview.running]);
+  }, [voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength, clarityCompareOff, preview.running]);
 
   function changeVoiceSetting(key: keyof VoiceSettings, value: number) {
     setVoiceSettings(previous => ({ ...previous, [key]: value }));
@@ -198,7 +200,7 @@ function App() {
         setPreview(emptyPreview);
       } else {
         if (!selectedInput || !selectedOutput) { setMessage('Connect a microphone and headphone output, or choose devices manually.'); return; }
-        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength });
+        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength: clarityCompareOff ? 0 : clarityStrength });
         setPreview(await invoke<Preview>('preview_status'));
       }
       setMessage('');
@@ -241,17 +243,17 @@ function App() {
             <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? 'Stop listening' : 'Test microphone'}</button>
             <button className={'compare-button' + (bypass ? ' comparing' : '')} disabled={!preview.running || busy} aria-pressed={bypass} onClick={() => setBypass(current => !current)}>{bypass ? 'Original sound • ON' : 'Compare original sound'}</button>
           </div>
-          <small className="simple-disclaimer">Use headphones to prevent feedback. Windows audio defaults remain unchanged.</small>
+          <small className="simple-disclaimer">Use headphones to prevent feedback. If you still hear clicks when the preview is stopped, the sound comes from another monitor path (headset sidetone, Windows Listen or Sonar), not this filter.</small>
         </div>
         <section className="voice-tuning" aria-label="Voice cleanup and clarity">
           <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">TRANSIENT CONTROL</span><h3>Clap & impact filter</h3></div><strong>{impactStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={impactStrength} aria-label="Clap and impact suppression" onChange={event => { setImpactStrength(Number(event.target.value)); setBypass(false); }}/><small>Reduces isolated claps, clicks and short impacts. During speech it uses gentler reduction to protect words. {preview.running ? "Impacts detected: " + preview.impact_events : ""}</small></div>
-          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); }}/><small>Gentle presence EQ and low-mid cleanup after the neural filter. Lower it if your voice becomes too bright.</small></div>
+          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); setClarityCompareOff(false); }}/><small>Dedicated vocal EQ: stronger 3 kHz presence and less 320 Hz muddiness. This affects the preview only.</small><button type="button" className={"compare-button" + (clarityCompareOff ? " comparing" : "")} disabled={!preview.running || busy || bypass} aria-pressed={clarityCompareOff} onClick={() => setClarityCompareOff(value => !value)}>{clarityCompareOff ? "A/B: clarity OFF · tap for ON" : "A/B: clarity ON · tap for OFF"}</button></div>
         </section>
         <details className="advanced-panel">
           <summary>Advanced settings <span>Optional</span></summary>
           <div className="advanced-content">
             <p>Fine-tune only if you want to. These controls apply to the live preview.</p>
-            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setImpactStrength(defaultImpactStrength); setClarityStrength(defaultClarityStrength); setBypass(false);}}>Reset settings</button></div>
+            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setImpactStrength(defaultImpactStrength); setClarityStrength(defaultClarityStrength); setClarityCompareOff(false); setBypass(false);}}>Reset settings</button></div>
             <div className="voice-controls">
               {([
                 ['high_pass_hz', 'High-pass filter', 20, 250, 5, 'Hz'],
