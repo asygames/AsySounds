@@ -198,6 +198,7 @@ main > header > div { min-width:0; }
 .tuning-head strong { color:#c9b6ff; font-size:22px; font-variant-numeric:tabular-nums; }
 .tuning-card input[type=range] { min-width:0; width:100%; accent-color:#a58aff; cursor:pointer; }
 .tuning-card small { color:#aeb6ce; line-height:1.5; }
+.tuning-card .compare-button { width:100%; text-align:center; padding:11px; font-size:12px; }
 .mixer { display:flex; flex-wrap:wrap; gap:clamp(10px,1.3vw,17px); }
 .mixer article { flex:1 1 170px; min-width:min(100%,165px); min-height:295px; padding:18px 11px; }
 .mixer .channel-meter { height:clamp(75px,11vh,125px); }

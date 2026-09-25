@@ -1,6 +1,7 @@
-//! Conservative frame-aligned suppression for isolated broadband transients (claps/clicks).
-//! Runs on the dedicated DSP worker; no heap allocation, locks or new model calls.
-//! Not a replacement for multi-source speech separation during overlapping speech.
+//! Frame-aligned attenuation of short isolated microphone transients.
+//! RNNoise outputs the previous 10 ms frame; the detector examines that same
+//! delayed dry frame rather than trusting RNNoise's speech estimate for clicks.
+//! This is conservative around speech and cannot perfectly separate overlapping sources.
 use crate::noise::FRAME_SIZE;
 
 pub struct ImpactSuppressor {
@@ -11,10 +12,16 @@ pub struct ImpactSuppressor {
     events: u64,
 }
 
+impl Default for ImpactSuppressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImpactSuppressor {
     pub fn new() -> Self {
         Self {
-            background_rms: 0.008,
+            background_rms: 0.006,
             gain: 1.0,
             hold: 0,
             speech_hangover: 0,
@@ -25,8 +32,10 @@ impl ImpactSuppressor {
     pub fn events(&self) -> u64 {
         self.events
     }
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
 
-    /// The input and output must refer to the same 10-ms frame (RNNoise delays one frame).
     pub fn process_frame(
         &mut self,
         input: &[f32; FRAME_SIZE],
@@ -35,11 +44,11 @@ impl ImpactSuppressor {
         strength: u8,
         bypass: bool,
     ) {
-        let mut sum = 0.0_f32;
+        let mut sum = 0.0;
         let mut peak = 0.0_f32;
-        let mut movement = 0.0_f32;
-        let mut magnitude = 0.0_f32;
-        let mut last = 0.0_f32;
+        let mut movement = 0.0;
+        let mut magnitude = 0.0;
+        let mut last = 0.0;
         for &sample in input {
             let x = if sample.is_finite() {
                 sample.clamp(-1.0, 1.0)
@@ -53,25 +62,36 @@ impl ImpactSuppressor {
             last = x;
         }
         let rms = (sum / FRAME_SIZE as f32).sqrt();
-        let roughness = movement / magnitude.max(1e-5);
-        let crest = peak / rms.max(1e-5);
-        let rise = rms / self.background_rms.max(0.006);
-        let speech_like =
-            voice_probability.is_finite() && voice_probability > 0.63 && roughness < 0.76;
+        let roughness = movement / magnitude.max(1e-6);
+        let crest = peak / rms.max(1e-6);
+        let rise = rms / self.background_rms.max(0.0025);
+
+        // A high VAD alone can misclassify a clap as speech. Require relatively
+        // periodic spectral behaviour before extending the speech protection.
+        let speech_like = voice_probability.is_finite()
+            && voice_probability > 0.68
+            && roughness < 0.76
+            && crest < 3.5;
         if speech_like {
-            self.speech_hangover = 18;
+            self.speech_hangover = 16;
         } else {
             self.speech_hangover = self.speech_hangover.saturating_sub(1);
         }
 
-        // Distinguish an abrupt broadband impulse from ordinary sustained vowels.
-        // A concurrent voice can be damaged by hard gating, so apply only partial ducking.
-        let impact = peak > 0.12
-            && rms > 0.025
-            && crest > 1.65
-            && roughness > 0.78
-            && rise > if self.speech_hangover > 0 { 4.5 } else { 2.7 };
-        let amount = strength.min(100) as f32 / 100.0;
+        // The old rms > 0.025 requirement silently missed clicks lasting only a
+        // few samples. The impulse branch uses crest and relative peak instead.
+        let loud_impulse = (peak > (self.background_rms * 4.5).max(0.032)
+            && crest > 4.5
+            && roughness > 0.48)
+            || (peak > (self.background_rms * 5.0).max(0.070) && crest > 2.5 && roughness > 0.65);
+        let wide_impact = peak > (self.background_rms * 4.0).max(0.085)
+            && rms > self.background_rms.max(0.010) * 1.45
+            && crest > 1.75
+            && roughness > 0.76
+            && rise > 1.65;
+        let impact = loud_impulse || wide_impact;
+        let intensity = (f32::from(strength.min(100)) / 100.0).sqrt();
+
         if bypass || strength == 0 {
             self.hold = 0;
             self.gain = 1.0;
@@ -79,46 +99,37 @@ impl ImpactSuppressor {
             if self.hold == 0 {
                 self.events = self.events.saturating_add(1);
             }
-            self.hold = 7; // includes short reflections following the initial clap
-            let floor = if self.speech_hangover > 0 {
-                0.40
-            } else {
-                0.045
-            };
-            self.gain = 1.0 - (1.0 - floor) * amount;
+            // Suppression around ongoing speech must not aggressively mute syllables.
+            let speaking = self.speech_hangover > 0;
+            let floor = if speaking { 0.50 } else { 0.018 };
+            self.gain = (1.0 - (1.0 - floor) * intensity).min(self.gain);
+            self.hold = if speaking { 2 } else { 6 };
         } else if self.hold > 0 {
             self.hold -= 1;
         } else {
-            // Decay in tens of milliseconds to avoid pumping on room reverberation.
-            self.gain += (1.0 - self.gain) * 0.32;
+            self.gain += (1.0 - self.gain) * 0.25;
         }
 
-        // Update the baseline mostly from non-impulsive frames; avoid teaching a clap
-        // to the detector as the new normal. Never let the floor grow without bound.
-        if !impact {
-            let observed = rms.min(self.background_rms * 1.3 + 0.001);
+        // Do not learn an impulse as the new baseline or inflate it with speech.
+        if !impact && self.speech_hangover == 0 {
+            let observed = rms.min(self.background_rms * 1.15 + 0.0008);
             self.background_rms =
-                (self.background_rms * 0.985 + observed * 0.015).clamp(0.002, 0.12);
+                (self.background_rms * 0.992 + observed * 0.008).clamp(0.0015, 0.10);
         }
+
         if !bypass && strength != 0 {
-            for sample in output.iter_mut() {
-                *sample = (*sample * self.gain).clamp(-1.0, 1.0);
+            for x in output {
+                *x = (*x * self.gain).clamp(-1.0, 1.0);
             }
         }
-    }
-}
-
-impl Default for ImpactSuppressor {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn clap() -> [f32; FRAME_SIZE] {
-        // Deterministic broadband short burst, not a prerecorded user signal.
         let mut data = [0.0; FRAME_SIZE];
         let mut seed = 0xA5C3_37E9_u32;
         for x in data.iter_mut().skip(80).take(170) {
@@ -129,56 +140,98 @@ mod tests {
         }
         data
     }
+    fn power(signal: &[f32; FRAME_SIZE]) -> f32 {
+        signal.iter().map(|x| x * x).sum()
+    }
     #[test]
-    fn isolated_clap_is_attenuated_without_mutating_dry_input() {
+    fn isolated_clap_is_attenuated() {
         let mut filter = ImpactSuppressor::new();
-        let input = clap();
-        let mut wet = input;
-        filter.process_frame(&input, &mut wet, 0.08, 100, false);
-        let input_power: f32 = input.iter().map(|x| x * x).sum();
-        let wet_power: f32 = wet.iter().map(|x| x * x).sum();
+        let original = clap();
+        let mut wet = original;
+        filter.process_frame(&original, &mut wet, 0.08, 100, false);
+        assert!(power(&wet) < power(&original) * 0.01);
+        assert_eq!(filter.events(), 1);
+    }
+    #[test]
+    fn short_low_energy_mouse_click_is_not_ignored() {
+        let mut filter = ImpactSuppressor::new();
+        let mut input = [0.0; FRAME_SIZE];
+        input[47..50].fill(0.11); // three samples: 0.27ms; old RMS gate missed this
+        let mut processed = input;
+        filter.process_frame(&input, &mut processed, 0.07, 100, false);
         assert!(
-            wet_power < input_power * 0.06,
-            "isolated clap should be strongly ducked"
+            power(&processed) < power(&input) * 0.01,
+            "short click leaked"
         );
         assert_eq!(filter.events(), 1);
     }
     #[test]
-    fn steady_voiced_tone_is_not_treated_as_impact() {
+    fn quiet_short_click_is_attenuated_at_default_strength() {
+        let mut filter = ImpactSuppressor::new();
+        let mut click = [0.0; FRAME_SIZE];
+        click[33..36].fill(0.04);
+        let mut out = click;
+        filter.process_frame(&click, &mut out, 0.1, 85, false);
+        assert!(
+            power(&out) < power(&click) * 0.02,
+            "quiet mouse click leaked"
+        );
+        assert_eq!(filter.events(), 1);
+    }
+    #[test]
+    fn clap_reverberation_is_attenuated_for_following_frames() {
+        let mut filter = ImpactSuppressor::new();
+        let original = clap();
+        let mut out = original;
+        filter.process_frame(&original, &mut out, 0.08, 100, false);
+        let tail = [0.01; FRAME_SIZE];
+        let mut wet = tail;
+        filter.process_frame(&tail, &mut wet, 0.08, 100, false);
+        assert!(power(&wet) < power(&tail) * 0.02);
+    }
+    #[test]
+    fn steady_voiced_tone_is_not_ducked() {
         let mut filter = ImpactSuppressor::new();
         for _ in 0..60 {
             let input = std::array::from_fn(|i| {
                 0.13 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin()
             });
-            let mut output = input;
-            filter.process_frame(&input, &mut output, 0.95, 100, false);
-            assert_eq!(input, output);
+            let mut out = input;
+            filter.process_frame(&input, &mut out, 0.95, 100, false);
+            assert_eq!(input, out);
         }
         assert_eq!(filter.events(), 0);
     }
     #[test]
-    fn bypass_and_off_leave_signal_unmodified() {
-        let mut filter = ImpactSuppressor::new();
-        let signal = clap();
-        let mut out = signal;
-        filter.process_frame(&signal, &mut out, 0.1, 100, true);
-        assert_eq!(signal, out);
-        filter.process_frame(&signal, &mut out, 0.1, 0, false);
-        assert_eq!(signal, out);
-    }
-    #[test]
-    fn simultaneous_voice_uses_a_less_aggressive_floor() {
+    fn voice_hangover_limits_suppression_on_impacts() {
         let mut filter = ImpactSuppressor::new();
         let tone = std::array::from_fn(|i| {
             0.10 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin()
         });
-        for _ in 0..3 {
-            let mut output = tone;
-            filter.process_frame(&tone, &mut output, 0.9, 100, false);
+        for _ in 0..4 {
+            let mut out = tone;
+            filter.process_frame(&tone, &mut out, 0.9, 100, false);
         }
-        let signal = clap();
-        let mut output = signal;
-        filter.process_frame(&signal, &mut output, 0.9, 100, false);
-        assert!(output.iter().any(|x| x.abs() > 0.04));
+        let input = clap();
+        let mut out = input;
+        filter.process_frame(&input, &mut out, 0.9, 100, false);
+        assert!(
+            power(&out) > power(&input) * 0.24,
+            "speech should not be hard gated"
+        );
+        assert!(
+            power(&out) < power(&input) * 0.6,
+            "clap should still be ducked"
+        );
+    }
+    #[test]
+    fn bypass_and_zero_preserve_audio() {
+        let mut filter = ImpactSuppressor::new();
+        let input = clap();
+        let mut out = input;
+        filter.process_frame(&input, &mut out, 0.1, 100, true);
+        assert_eq!(input, out);
+        filter.process_frame(&input, &mut out, 0.1, 0, false);
+        assert_eq!(input, out);
     }
 }

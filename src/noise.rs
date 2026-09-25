@@ -152,6 +152,19 @@ mod tests {
         assert_eq!(denoiser.impact_events(), 1);
     }
     #[test]
+    fn low_energy_click_is_ducked_in_end_to_end_neural_frame() {
+        let mut suppressor = NeuralSuppressor::new();
+        let mut short_click = [0.0; FRAME_SIZE];
+        short_click[27..30].fill(0.11);
+        let mut output = [0.0; FRAME_SIZE];
+        suppressor.process_frame(&short_click, &mut output, 0, 100, false);
+        suppressor.process_frame(&[0.0; FRAME_SIZE], &mut output, 0, 100, false);
+        let dry_energy: f32 = short_click.iter().map(|x| x * x).sum();
+        let wet_energy: f32 = output.iter().map(|x| x * x).sum();
+        assert!(wet_energy < dry_energy * 0.01, "low-energy click leaked");
+        assert_eq!(suppressor.impact_events(), 1);
+    }
+    #[test]
     fn rnnoise_frame_is_ten_milliseconds() {
         assert_eq!(FRAME_SIZE, 480);
         assert_eq!(SAMPLE_RATE, 48_000);
