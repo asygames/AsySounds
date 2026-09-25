@@ -1,6 +1,7 @@
 use asysounds_core::audio_sessions::{list_audio_sessions, set_audio_session};
 use asysounds_core::neural_monitor::{NeuralVoiceMonitor, list_devices};
 use asysounds_core::voice::VoiceSettings;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::State;
@@ -85,6 +86,8 @@ struct PreviewStatus {
     inference_us: u32,
     voice_probability: f32,
     impact_events: u64,
+    diagnostic_remaining_ms: u32,
+    diagnostic_ready: bool,
     peak: f32,
     raw_peak: f32,
     buffered_ms: u32,
@@ -95,6 +98,62 @@ struct PreviewStatus {
     sample_rate: u32,
     output_sample_rate: u32,
     error: Option<String>,
+}
+
+/// Small, explicit, in-memory A/B capture; no recordings are written to disk.
+#[derive(Serialize)]
+struct DiagnosticAudio {
+    original_wav: String,
+    processed_wav: String,
+}
+
+fn wav_data_url(samples: &[i16]) -> String {
+    let payload_size = (samples.len() * 2) as u32;
+    let mut bytes = Vec::with_capacity(44 + payload_size as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + payload_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes()); // PCM fmt chunk
+    bytes.extend_from_slice(&1_u16.to_le_bytes()); // uncompressed PCM
+    bytes.extend_from_slice(&1_u16.to_le_bytes()); // mono
+    bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&96_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes()); // block alignment
+    bytes.extend_from_slice(&16_u16.to_le_bytes()); // sample bits
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&payload_size.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    format!("data:audio/wav;base64,{}", STANDARD.encode(bytes))
+}
+
+#[tauri::command]
+fn begin_diagnostic(state: State<'_, PreviewState>) -> Result<(), String> {
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "Preview state unavailable".to_owned())?;
+    guard
+        .as_ref()
+        .ok_or_else(|| "Start microphone preview first".to_owned())?
+        .begin_diagnostic()
+}
+
+#[tauri::command]
+fn take_diagnostic(state: State<'_, PreviewState>) -> Result<DiagnosticAudio, String> {
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "Preview state unavailable".to_owned())?;
+    let (original, processed) = guard
+        .as_ref()
+        .ok_or_else(|| "Start microphone preview first".to_owned())?
+        .take_diagnostic()?;
+    Ok(DiagnosticAudio {
+        original_wav: wav_data_url(&original),
+        processed_wav: wav_data_url(&processed),
+    })
 }
 
 #[tauri::command]
@@ -108,6 +167,8 @@ fn audio_devices() -> Result<DeviceList, String> {
     })
 }
 
+// Tauri exposes these as individually named command parameters for UI compatibility.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn start_preview(
     input: String,
@@ -186,12 +247,15 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
     Ok(match guard.as_ref() {
         Some(monitor) => {
             let stats = monitor.stats();
+            let (diagnostic_remaining_ms, diagnostic_ready) = monitor.diagnostic_status();
             PreviewStatus {
                 running: true,
                 neural_enabled: true,
                 inference_us: monitor.inference_us(),
                 voice_probability: monitor.voice_probability(),
                 impact_events: monitor.impact_events(),
+                diagnostic_remaining_ms,
+                diagnostic_ready,
                 peak: stats.peak,
                 raw_peak: stats.raw_peak,
                 buffered_ms: stats.buffered_ms,
@@ -210,6 +274,8 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
             inference_us: 0,
             voice_probability: 0.0,
             impact_events: 0,
+            diagnostic_remaining_ms: 0,
+            diagnostic_ready: false,
             peak: 0.0,
             raw_peak: 0.0,
             buffered_ms: 0,
@@ -235,8 +301,36 @@ pub fn run() {
             start_preview,
             update_preview_settings,
             stop_preview,
-            preview_status
+            preview_status,
+            begin_diagnostic,
+            take_diagnostic
         ])
         .run(tauri::generate_context!())
         .expect("AsySounds application error");
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn wav_data_url_contains_valid_mono_pcm16_header_and_samples() {
+        let data = wav_data_url(&[0, 32767, -32768]);
+        let bytes = STANDARD
+            .decode(data.strip_prefix("data:audio/wav;base64,").unwrap())
+            .unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 42);
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(u16::from_le_bytes(bytes[20..22].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes(bytes[34..36].try_into().unwrap()), 16);
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 6);
+        assert_eq!(&bytes[44..], &[0, 0, 255, 127, 0, 128]);
+    }
 }

@@ -70,8 +70,9 @@ function readSavedMicrophone(): SavedMicrophone {
 }
 // Strength controls the local RNNoise neural model, not the legacy gate threshold.
 const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
-type Preview = { running: boolean; neural_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
-const emptyPreview: Preview = { running: false, neural_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
+type Preview = { running: boolean; neural_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; diagnostic_remaining_ms: number; diagnostic_ready: boolean; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
+type DiagnosticAudio = { original_wav: string; processed_wav: string };
+const emptyPreview: Preview = { running: false, neural_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, diagnostic_remaining_ms: 0, diagnostic_ready: false, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
 const channelNames = ['Game', 'Chat', 'Media', 'Aux', 'Microphone'];
 const channelIcons = ['🎮', '💬', '♫', '◈', '🎙'];
 
@@ -94,6 +95,8 @@ function App() {
   const [clarityCompareOff, setClarityCompareOff] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [diagnostic, setDiagnostic] = useState<DiagnosticAudio | null>(null);
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [sessions, setSessions] = useState<AudioSession[]>([]);
   const [sessionsBusy, setSessionsBusy] = useState(false);
   const [sessionsError, setSessionsError] = useState('');
@@ -192,6 +195,29 @@ function App() {
     setBypass(false);
   }
 
+  async function beginDiagnostic() {
+    setDiagnosticBusy(true);
+    try {
+      await invoke('begin_diagnostic');
+      setDiagnostic(null);
+      setMessage('');
+    } catch (error) { setMessage(String(error)); }
+    finally { setDiagnosticBusy(false); }
+  }
+
+  async function loadDiagnostic() {
+    setDiagnosticBusy(true);
+    try {
+      const clips = await invoke<DiagnosticAudio>('take_diagnostic');
+      setDiagnostic(clips);
+      // Stop headphone monitoring before the user plays either clip.
+      await invoke('stop_preview');
+      setPreview(emptyPreview);
+      setMessage('');
+    } catch (error) { setMessage(String(error)); }
+    finally { setDiagnosticBusy(false); }
+  }
+
   async function togglePreview() {
     setBusy(true);
     try {
@@ -245,6 +271,21 @@ function App() {
           </div>
           <small className="simple-disclaimer">Use headphones to prevent feedback. If you still hear clicks when the preview is stopped, the sound comes from another monitor path (headset sidetone, Windows Listen or Sonar), not this filter.</small>
         </div>
+        <section className="tuning-card diagnostic-card" aria-label="Record an original and processed comparison">
+          <div className="tuning-head"><div><span className="eyebrow">REAL MICROPHONE CHECK</span><h3>Compare the same 5-second recording</h3></div><span className="prototype-tag">LOCAL ONLY</span></div>
+          <small>Record only when you choose. Speak and make a click or clap; then stop the live preview before playing the two clips. Both use the exact same microphone input. Nothing is saved to disk or sent to a server.</small>
+          <div className="simple-actions">
+            <button className="secondary" disabled={!preview.running || preview.failed || bypass || busy || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onClick={() => void beginDiagnostic()}>{preview.diagnostic_remaining_ms > 0 ? 'Recording · ' + Math.ceil(preview.diagnostic_remaining_ms / 1000) + 's' : 'Record 5 seconds'}</button>
+            <button className="compare-button" disabled={!preview.running || !preview.diagnostic_ready || busy || diagnosticBusy} onClick={() => void loadDiagnostic()}>{diagnosticBusy ? 'Preparing comparison…' : 'Finish & compare · stop preview'}</button>
+          </div>
+          {preview.diagnostic_remaining_ms > 0 && <small>Capturing the unprocessed and processed signals simultaneously…</small>}
+          {preview.diagnostic_ready && <small>Recording ready. Select Finish & compare to stop headphone monitoring and play the two clips.</small>}
+          {diagnostic && !preview.running && <div className="diagnostic-players">
+            <label>Original microphone<audio controls preload="none" src={diagnostic.original_wav}/></label>
+            <label>AsySounds processed<audio controls preload="none" src={diagnostic.processed_wav}/></label>
+          </div>}
+          <small>If both clips differ but you still hear the original sound live, check hardware sidetone, Windows “Listen to this device”, or Sonar monitoring. This is still a preview, not a virtual microphone for Discord/OBS.</small>
+        </section>
         <section className="voice-tuning" aria-label="Voice cleanup and clarity">
           <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">TRANSIENT CONTROL</span><h3>Clap & impact filter</h3></div><strong>{impactStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={impactStrength} aria-label="Clap and impact suppression" onChange={event => { setImpactStrength(Number(event.target.value)); setBypass(false); }}/><small>Reduces isolated claps, clicks and short impacts. During speech it uses gentler reduction to protect words. {preview.running ? "Impacts detected: " + preview.impact_events : ""}</small></div>
           <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); setClarityCompareOff(false); }}/><small>Vocal EQ: +{(6 * clarityStrength / 100).toFixed(1)} dB at 3 kHz, −{(3.5 * clarityStrength / 100).toFixed(1)} dB at 320 Hz. Compare ON/OFF on the same preview; Discord and OBS are not affected.</small><button type="button" className={"compare-button" + (clarityCompareOff ? " comparing" : "")} disabled={!preview.running || busy || bypass} aria-pressed={clarityCompareOff} onClick={() => setClarityCompareOff(value => !value)}>{clarityCompareOff ? "A/B: clarity OFF · tap for ON" : "A/B: clarity ON · tap for OFF"}</button></div>

@@ -86,6 +86,17 @@ impl ImpactSuppressor {
 
         // Count the samples comprising the loud transient, rather than using
         // RMS over 480 samples: an ordinary mouse click may last <1 ms.
+        // A click superposed on a vowel often has a low frame crest factor.
+        // Isolated steep sample-to-sample steps detect it without muting a word.
+        let isolated_steps = input
+            .windows(2)
+            .filter(|pair| (pair[1] - pair[0]).abs() > max_step * 0.42)
+            .count();
+        let sharp_click = peak > (self.background_rms * 4.0).max(0.045)
+            && max_step > (rms * 1.1).max(0.040)
+            && max_step > peak * 0.32
+            && crest > 1.8
+            && isolated_steps <= 12;
         let active_samples = if peak > 0.0 {
             let threshold = (peak * 0.28).max(self.background_rms * 2.0);
             input.iter().filter(|x| x.abs() > threshold).count()
@@ -97,6 +108,7 @@ impl ImpactSuppressor {
             && crest > 4.0
             && (roughness > 0.36 || max_step > (rms * 4.0).max(0.025))
             && active_samples <= 52;
+        let narrow_click = narrow_click || sharp_click;
         let broadband = peak > (self.background_rms * 4.0).max(0.075)
             && rms > self.background_rms.max(0.010) * 1.4
             && roughness > 0.74
@@ -105,7 +117,7 @@ impl ImpactSuppressor {
         // VAD is often high on a clap. A highly tonal voice with a high VAD
         // needs a stronger threshold than a real broadband transient.
         let impact = if speech_like {
-            narrow_click && crest > 6.0
+            sharp_click || (narrow_click && crest > 6.0)
         } else {
             narrow_click || broadband
         };
@@ -293,6 +305,23 @@ mod tests {
             "clap overlapping speech must be detected"
         );
         assert!(power(&out) < power(&mixed) * 0.15);
+    }
+    #[test]
+    fn modest_mouse_click_over_speech_is_caught_without_muting_word() {
+        let mut filter = ImpactSuppressor::new();
+        for _ in 0..10 {
+            let mut output = tone();
+            filter.process_frame(&tone(), &mut output, 0.98, 85, false);
+        }
+        let mut input = tone();
+        input[238] += 0.22;
+        input[239] -= 0.18;
+        let mut output = input;
+        filter.process_frame(&input, &mut output, 0.98, 85, false);
+        assert_eq!(filter.events(), 1, "quiet click over voice was missed");
+        assert!(output[238].abs() < input[238].abs() * 0.18);
+        assert!((output[30] - input[30]).abs() < 1e-6);
+        assert!((output[460] - input[460]).abs() < 1e-6);
     }
     #[test]
     fn bypass_and_zero_preserve_audio() {

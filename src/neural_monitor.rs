@@ -30,6 +30,25 @@ struct WorkerContext {
     running: Arc<AtomicBool>,
     shared: Arc<Shared>,
     controls: Arc<Mutex<Controls>>,
+    diagnostic: Arc<Mutex<DiagnosticCapture>>,
+}
+
+const DIAGNOSTIC_FRAMES: usize = 500; // 5 seconds, 48 kHz, 10 ms frames.
+#[derive(Default)]
+struct DiagnosticCapture {
+    remaining_frames: usize,
+    original: Vec<i16>,
+    processed: Vec<i16>,
+    ready: bool,
+}
+
+#[inline]
+fn pcm16(sample: f32) -> i16 {
+    if sample.is_finite() {
+        (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16
+    } else {
+        0
+    }
 }
 
 struct Shared {
@@ -53,6 +72,7 @@ pub struct NeuralVoiceMonitor {
     running: Arc<AtomicBool>,
     shared: Arc<Shared>,
     controls: Arc<Mutex<Controls>>,
+    diagnostic: Arc<Mutex<DiagnosticCapture>>,
     input_rate: u32,
     output_rate: u32,
 }
@@ -121,6 +141,7 @@ impl NeuralVoiceMonitor {
             clarity_strength: clarity_strength.min(100),
             bypass,
         }));
+        let diagnostic = Arc::new(Mutex::new(DiagnosticCapture::default()));
         let running = Arc::new(AtomicBool::new(true));
         let input_ready = Arc::new(AtomicBool::new(false));
         let notify_worker = Arc::new(OnceLock::<thread::Thread>::new());
@@ -182,6 +203,7 @@ impl NeuralVoiceMonitor {
         let worker_running = Arc::clone(&running);
         let worker_shared = Arc::clone(&shared);
         let worker_controls = Arc::clone(&controls);
+        let worker_diagnostic = Arc::clone(&diagnostic);
         let worker = thread::Builder::new()
             .name("AsySounds-RNNoise".into())
             .spawn(move || {
@@ -197,6 +219,7 @@ impl NeuralVoiceMonitor {
                         running: worker_running,
                         shared: worker_shared,
                         controls: worker_controls,
+                        diagnostic: worker_diagnostic,
                     },
                 )
             })
@@ -232,6 +255,7 @@ impl NeuralVoiceMonitor {
             running,
             shared,
             controls,
+            diagnostic,
             input_rate,
             output_rate,
         })
@@ -254,6 +278,44 @@ impl NeuralVoiceMonitor {
                 clarity_strength: clarity_strength.min(100),
             };
         }
+    }
+
+    /// Records both sides of the same stream only after an explicit UI action.
+    /// Audio stays in memory and is never saved or transmitted by the core.
+    pub fn begin_diagnostic(&self) -> Result<(), String> {
+        if !self.running.load(Ordering::Acquire) || self.shared.failed.load(Ordering::Acquire) {
+            return Err("Start a healthy microphone preview first".into());
+        }
+        let mut diagnostic = self.diagnostic.lock().map_err(|_| "Recorder unavailable")?;
+        if diagnostic.remaining_frames != 0 {
+            return Err("A comparison is already recording".into());
+        }
+        *diagnostic = DiagnosticCapture {
+            remaining_frames: DIAGNOSTIC_FRAMES,
+            original: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
+            processed: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
+            ready: false,
+        };
+        Ok(())
+    }
+
+    pub fn diagnostic_status(&self) -> (u32, bool) {
+        self.diagnostic
+            .lock()
+            .map(|state| (state.remaining_frames as u32 * 10, state.ready))
+            .unwrap_or((0, false))
+    }
+
+    pub fn take_diagnostic(&self) -> Result<(Vec<i16>, Vec<i16>), String> {
+        let mut state = self.diagnostic.lock().map_err(|_| "Recorder unavailable")?;
+        if !state.ready || state.remaining_frames != 0 {
+            return Err("The five-second comparison is not ready".into());
+        }
+        state.ready = false;
+        Ok((
+            std::mem::take(&mut state.original),
+            std::mem::take(&mut state.processed),
+        ))
     }
 
     pub fn stats(&self) -> MonitorStats {
@@ -319,7 +381,9 @@ fn worker_loop(
         running,
         shared,
         controls,
+        diagnostic,
     } = context;
+    let mut aligned_raw = [0.0_f32; FRAME_SIZE];
     let mut frame = [0.0_f32; FRAME_SIZE];
     let mut filtered = [0.0_f32; FRAME_SIZE];
     let mut bypass_previous = false;
@@ -375,6 +439,19 @@ fn worker_loop(
             voice.process_in_place(&mut filtered);
             clarity.process_in_place(&mut filtered, controls_now.clarity_strength);
         }
+        // This opt-in copy runs on the DSP worker, not in either audio callback.
+        // The raw frame is the delayed frame corresponding to RNNoise output.
+        if let Ok(mut clip) = diagnostic.lock()
+            && clip.remaining_frames > 0
+        {
+            clip.original.extend(aligned_raw.iter().map(|&x| pcm16(x)));
+            clip.processed.extend(filtered.iter().map(|&x| pcm16(x)));
+            clip.remaining_frames -= 1;
+            if clip.remaining_frames == 0 {
+                clip.ready = true;
+            }
+        }
+        aligned_raw = frame;
         shared.inference_us.store(
             start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32,
             Ordering::Relaxed,

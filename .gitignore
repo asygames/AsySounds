@@ -1,6 +1,7 @@
 /target
 /ui/target
 /ui/src-tauri/target
+/target-tauri-validation
 /ui/node_modules
 /ui/dist
 /ui/src-tauri/gen

@@ -230,3 +230,9 @@ main > header > div { min-width:0; }
   .app > aside .nav { flex:1 0 auto; width:auto; padding:10px 12px; white-space:nowrap; }
 }
 @media(prefers-reduced-motion:reduce){.tuning-card,.simple-voice-panel{animation:none;}}
+
+.diagnostic-card{grid-column:1/-1;min-width:0;margin-top:4px}
+.diagnostic-card .simple-actions{margin-top:0}
+.diagnostic-players{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:14px}
+.diagnostic-players label{display:grid;gap:9px;color:#d1d5e8;font-size:13px;font-weight:700;min-width:0}
+.diagnostic-players audio{display:block;width:100%;max-width:100%;min-width:0;height:48px}
