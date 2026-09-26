@@ -4,7 +4,7 @@
 //! This does not perform source separation when noise overlaps speech.
 use crate::noise::FRAME_SIZE;
 
-const CLICK_RADIUS: usize = 72; // 1.5 ms at 48 kHz on either side of a click.
+const CLICK_RADIUS: usize = 48; // 1 ms at 48 kHz on either side of a sparse click.
 
 pub struct ImpactSuppressor {
     background_rms: f32,
@@ -125,8 +125,11 @@ impl ImpactSuppressor {
         let speaking = self.speech_hangover > 0;
         // In speech, reject frame-wide noise unless it is an exceptional,
         // loud transient. Otherwise normal consonants sound robotic.
+        // Never apply broadband frame-wide ducking while speech is present.
+        // It amplitude-modulates vowels and breathy consonants (reported buzz).
+        // A simple transient detector cannot separate a clap overlapping speech.
         let impact = if speaking {
-            sharp_click || (narrow_click && crest > 6.0) || (broadband && peak > 0.40 && rise > 8.0)
+            sharp_click || (narrow_click && crest > 6.0)
         } else {
             narrow_click || broadband
         };
@@ -135,25 +138,25 @@ impl ImpactSuppressor {
         if bypass || strength == 0 {
             self.hold = 0;
             self.gain = 1.0;
+        } else if narrow_click && impact {
+            // Repair only the short impulse; do not attenuate the entire
+            // 10-ms frame or hold a reduced gain into the next syllable.
+            if self.hold == 0 {
+                self.events = self.events.saturating_add(1);
+            }
+            self.hold = 0;
+            self.gain = 1.0;
+        } else if speaking {
+            // Clear stale clap/reverb gain as soon as speech resumes.
+            self.hold = 0;
+            self.gain = 1.0;
         } else if impact {
             if self.hold == 0 {
                 self.events = self.events.saturating_add(1);
             }
-            if speaking && narrow_click {
-                // The click occupies only a few samples. Keeping a 10 ms
-                // full-frame 50% duck made the entire syllable noticeably pump.
-                // Carve out the attack with a smoothly tapered local window.
-                self.hold = 0;
-                self.gain = 1.0;
-            } else {
-                // When speech overlaps a broad clap, prioritize voice
-                // continuity: limit attenuation and never hold a reduced
-                // whole-frame gain across later syllables. Alone, claps
-                // retain the stronger transient/reverberation suppression.
-                let floor = if speaking { 0.50 } else { 0.012 };
-                self.gain = (1.0 - (1.0 - floor) * intensity).min(self.gain);
-                self.hold = if speaking { 0 } else { 7 };
-            }
+            // Only isolated, broadband claps between phrases are ducked.
+            self.gain = (1.0 - 0.988 * intensity).min(self.gain);
+            self.hold = 3; // 30 ms, not 70 ms of potentially audible pumping.
         } else if self.hold > 0 {
             self.hold -= 1;
         } else {
@@ -170,22 +173,25 @@ impl ImpactSuppressor {
         if bypass || strength == 0 {
             return;
         }
-        let local_click = impact && narrow_click && self.speech_hangover > 0;
+        let local_click = impact && narrow_click;
+        // Sparse clicks can be strongly reduced within their ~2 ms window
+        // without increasing full-frame ducking on voice. Zero still bypasses.
+        let click_intensity = intensity.powf(0.25);
         let fade_samples = if self.gain < previous_gain {
             24
         } else {
             FRAME_SIZE
         };
         for (index, sample) in output.iter_mut().enumerate() {
-            // Frame-wise gain steps can create a 100-Hz buzz on voiced audio.
-            // Fast attack suppresses the transient; slow release protects syllables.
+            // Smooth only isolated broad claps when speech is absent;
+            // sparse clicks are repaired locally instead of modulating voice.
             let fraction = ((index + 1) as f32 / fade_samples as f32).min(1.0);
             let smooth_gain = previous_gain + (self.gain - previous_gain) * fraction;
             let local = if local_click {
                 let distance = index.abs_diff(peak_at);
                 if distance < CLICK_RADIUS {
                     let fade = (distance as f32 / CLICK_RADIUS as f32).powi(2);
-                    1.0 - 0.985 * intensity * (1.0 - fade)
+                    1.0 - 0.985 * click_intensity * (1.0 - fade)
                 } else {
                     1.0
                 }
@@ -287,7 +293,7 @@ mod tests {
         assert!((out[460] - input[460]).abs() < 1e-6);
     }
     #[test]
-    fn broadband_clap_over_speech_is_reduced_without_hard_gating() {
+    fn broadband_clap_does_not_duck_entire_frame_when_speech_is_active() {
         let mut filter = ImpactSuppressor::new();
         for _ in 0..4 {
             let input = tone();
@@ -297,11 +303,13 @@ mod tests {
         let input = clap();
         let mut out = input;
         filter.process_frame(&input, &mut out, 0.95, 100, false);
-        assert!(power(&out) < power(&input) * 0.50);
-        assert!(power(&out) > power(&input) * 0.15); // preserve overlapping syllables
+        // Without source separation, hard ducking can remove syllables and
+        // make the voice buzz. Preserve mixed speech, including its clap.
+        assert_eq!(out, input);
+        assert_eq!(filter.gain(), 1.0);
     }
     #[test]
-    fn simultaneous_voiced_tone_and_broadband_clap_is_detected() {
+    fn overlapping_clap_does_not_pump_the_following_syllable() {
         let mut filter = ImpactSuppressor::new();
         for _ in 0..8 {
             let reference = tone();
@@ -315,12 +323,13 @@ mod tests {
         let mut out = mixed;
         filter.process_frame(&mixed, &mut out, 0.96, 100, false);
         assert_eq!(
-            filter.events(),
-            1,
-            "clap overlapping speech must be detected"
+            out, mixed,
+            "do not erase speech while chasing broadband claps"
         );
-        assert!(power(&out) < power(&mixed) * 0.50);
-        assert!(power(&out) > power(&mixed) * 0.15);
+        let next = tone();
+        let mut next_out = next;
+        filter.process_frame(&next, &mut next_out, 0.96, 100, false);
+        assert_eq!(next_out, next, "no residual ducking in the next vowel");
     }
     #[test]
     fn breathy_fricative_speech_is_not_misclassified_as_repeated_claps() {
@@ -383,6 +392,24 @@ mod tests {
         assert!((output[30] - input[30]).abs() < 1e-6);
         assert!((output[460] - input[460]).abs() < 1e-6);
     }
+    #[test]
+    fn moderate_strength_reduces_sparse_click_without_affecting_rest_of_speech() {
+        let mut filter = ImpactSuppressor::new();
+        for _ in 0..8 {
+            let input = tone();
+            let mut output = input;
+            filter.process_frame(&input, &mut output, 0.95, 45, false);
+        }
+        let mut input = tone();
+        input[240] += 0.8;
+        input[241] -= 0.8;
+        let mut output = input;
+        filter.process_frame(&input, &mut output, 0.95, 45, false);
+        assert!(output[240].abs() < input[240].abs() * 0.20);
+        assert_eq!(&output[..180], &input[..180]);
+        assert_eq!(&output[310..], &input[310..]);
+    }
+
     #[test]
     fn impact_release_is_smooth_across_audio_frame_boundaries() {
         let mut filter = ImpactSuppressor::new();

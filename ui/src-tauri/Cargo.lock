@@ -83,7 +83,7 @@ checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 
 [[package]]
 name = "asysounds"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "asysounds_core",
  "base64 0.23.1",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "asysounds_core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cpal",
  "nnnoiseless",
