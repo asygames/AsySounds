@@ -5,7 +5,9 @@ import './style.css';
 
 type View = 'Mixer' | 'Devices' | 'Microphone' | 'Settings';
 type AudioSession = { id: string; pid: number; name: string; volume: number; muted: boolean; active: boolean };
-type Devices = { inputs: string[]; outputs: string[]; default_input: string | null; default_output: string | null };
+type CableRoute = { playback: string; capture: string | null };
+type OutputMode = 'monitor' | 'cable';
+type Devices = { inputs: string[]; outputs: string[]; default_input: string | null; default_output: string | null; cable_routes: CableRoute[] };
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
 const defaultNoiseStrength = 65;
@@ -15,7 +17,7 @@ const microphoneStorageKey = 'asysounds:microphone:v1';
 const mixerStorageKey = 'asysounds:mixer:v1';
 const defaultMixerLevels = [78, 65, 90, 72, 85];
 const defaultMixerMuted = [false, false, false, false, false];
-type SavedMicrophone = { input: string; output: string; noiseStrength: number; impactStrength: number; clarityStrength: number; voiceSettings: VoiceSettings };
+type SavedMicrophone = { input: string; output: string; cableOutput: string; outputMode: OutputMode; noiseStrength: number; impactStrength: number; clarityStrength: number; voiceSettings: VoiceSettings };
 type SavedMixer = { levels: number[]; muted: boolean[] };
 function validControl(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
@@ -40,7 +42,7 @@ function readSavedMixer(): SavedMixer {
 }
 
 function readSavedMicrophone(): SavedMicrophone {
-  const defaults: SavedMicrophone = { input: '', output: '', noiseStrength: defaultNoiseStrength, impactStrength: defaultImpactStrength, clarityStrength: defaultClarityStrength, voiceSettings: defaultVoiceSettings };
+  const defaults: SavedMicrophone = { input: '', output: '', cableOutput: '', outputMode: 'monitor', noiseStrength: defaultNoiseStrength, impactStrength: defaultImpactStrength, clarityStrength: defaultClarityStrength, voiceSettings: defaultVoiceSettings };
   try {
     const raw = window.localStorage.getItem(microphoneStorageKey);
     if (!raw) return defaults;
@@ -52,6 +54,8 @@ function readSavedMicrophone(): SavedMicrophone {
     return {
       input: typeof candidate.input === 'string' ? candidate.input : '',
       output: typeof candidate.output === 'string' ? candidate.output : '',
+      cableOutput: typeof candidate.cableOutput === 'string' ? candidate.cableOutput : '',
+      outputMode: candidate.outputMode === 'cable' ? 'cable' : 'monitor',
       noiseStrength: validControl(candidate.noiseStrength, defaultNoiseStrength, 0, 100),
       impactStrength: validControl(candidate.impactStrength, defaultImpactStrength, 0, 100),
       clarityStrength: validControl(candidate.clarityStrength, defaultClarityStrength, 0, 100),
@@ -85,9 +89,11 @@ function App() {
   const [savedMixer] = useState(readSavedMixer);
   const [levels, setLevels] = useState(savedMixer.levels);
   const [muted, setMuted] = useState<boolean[]>(savedMixer.muted);
-  const [devices, setDevices] = useState<Devices>({ inputs: [], outputs: [], default_input: null, default_output: null });
+  const [devices, setDevices] = useState<Devices>({ inputs: [], outputs: [], default_input: null, default_output: null, cable_routes: [] });
   const [input, setInput] = useState(savedMicrophone.input);
   const [output, setOutput] = useState(savedMicrophone.output);
+  const [outputMode, setOutputMode] = useState<OutputMode>(savedMicrophone.outputMode);
+  const [cableOutput, setCableOutput] = useState(savedMicrophone.cableOutput);
   const [preview, setPreview] = useState<Preview>(emptyPreview);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(savedMicrophone.voiceSettings);
   const [noiseStrength, setNoiseStrength] = useState(savedMicrophone.noiseStrength);
@@ -113,6 +119,9 @@ function App() {
   const defaultOutput = devices.default_output && devices.outputs.includes(devices.default_output) ? devices.default_output : '';
   const selectedInput = input || defaultInput;
   const selectedOutput = output || defaultOutput;
+  const readyCableRoutes = devices.cable_routes.filter(route => route.capture !== null);
+  const selectedCableRoute = readyCableRoutes.find(route => route.playback === cableOutput);
+  const selectedDestination = outputMode === 'cable' ? (selectedCableRoute?.playback ?? '') : selectedOutput;
 
   async function refreshSessions() {
     try {
@@ -138,17 +147,18 @@ function App() {
       setDevices(found);
       setInput(current => found.inputs.includes(current) ? current : '');
       setOutput(current => found.outputs.includes(current) ? current : '');
+      setCableOutput(current => found.cable_routes.some(route => route.playback === current && route.capture !== null) ? current : '');
       setMessage('');
     } catch (error) { setMessage(String(error)); }
   }
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(microphoneStorageKey, JSON.stringify({ input, output, voiceSettings, noiseStrength, impactStrength, clarityStrength }));
+      window.localStorage.setItem(microphoneStorageKey, JSON.stringify({ input, output, cableOutput, outputMode, voiceSettings, noiseStrength, impactStrength, clarityStrength }));
     } catch {
       // Preview remains available even if local persistence is blocked.
     }
-  }, [input, output, voiceSettings, noiseStrength, impactStrength, clarityStrength]);
+  }, [input, output, cableOutput, outputMode, voiceSettings, noiseStrength, impactStrength, clarityStrength]);
 
   useEffect(() => {
     try {
@@ -237,8 +247,11 @@ function App() {
         await invoke('stop_preview');
         setPreview(emptyPreview);
       } else {
-        if (!selectedInput || !selectedOutput) { setMessage('Connect a microphone and headphone output, or choose devices manually.'); return; }
-        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength: clarityCompareOff ? 0 : clarityStrength, monitorEnabled });
+        if (!selectedInput || !selectedDestination) { setMessage(outputMode === 'cable' ? 'Choose a complete virtual cable (playback CABLE Input and recording CABLE Output).' : 'Connect a microphone and headphone output, or choose devices manually.'); return; }
+        if (outputMode === 'cable' && selectedCableRoute?.capture === selectedInput) { setMessage('Select a physical microphone, not the capture side of the same cable.'); return; }
+        const outputEnabled = outputMode === 'cable' ? true : monitorEnabled;
+        if (outputMode === 'cable') setMonitorEnabled(true);
+        await invoke('start_preview', { input: selectedInput, output: selectedDestination, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength: clarityCompareOff ? 0 : clarityStrength, monitorEnabled: outputEnabled, outputMode });
         setPreview(await invoke<Preview>('preview_status'));
       }
       setMessage('');
@@ -254,17 +267,21 @@ function App() {
         <button key={name} className={'nav ' + (view === name ? 'active' : '')} onClick={() => setView(name)}>
           <span aria-hidden="true">{['◫', '◉', '⌁', '⚙'][index]}</span>{name}
         </button>)}</nav>
-      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · Preview 0.1.0</small></div>
+      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.1</small></div>
     </aside>
     <main>
-      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Local noise, impact and voice clarity controls.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? 'LIVE VOICE PREVIEW' : 'LOCAL AUDIO ENGINE'}</span></header>
+      <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Local noise, impact and voice clarity controls.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? (outputMode === 'cable' ? 'PROCESSED MIC ROUTING' : 'LIVE VOICE PREVIEW') : 'LOCAL AUDIO ENGINE'}</span></header>
       {message && <div role="alert" className="notice error">{message}</div>}
       {view === 'Microphone' && <section className="voice-panel simple-voice-panel">
         <div className="panel-heading"><div><span className="eyebrow">MICROPHONE STUDIO <span className="tiny-live-dot"/></span><h2>Clean voice, fewer distractions.</h2><p>Real-time neural processing on your PC. No cloud, no extra accounts.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh devices</button></div>
+        <div className="output-modes" role="group" aria-label="Processed audio destination">
+          <button type="button" className={'output-mode ' + (outputMode === 'monitor' ? 'selected' : '')} disabled={preview.running || busy} aria-pressed={outputMode === 'monitor'} onClick={() => setOutputMode('monitor')}><strong>Headphone preview</strong><small>Listen to your processed voice without changing Windows devices.</small></button>
+          <button type="button" className={'output-mode ' + (outputMode === 'cable' ? 'selected' : '')} disabled={preview.running || busy} aria-pressed={outputMode === 'cable'} onClick={() => setOutputMode('cable')}><strong>Virtual cable output</strong><small>Send your processed voice to a recording endpoint for OBS and Discord.</small></button>
+        </div>
         <div className="device-grid compact-devices">
           <label>Microphone<select value={input} onChange={event => setInput(event.target.value)} disabled={preview.running}><option value="">{defaultInput ? 'Windows default · ' + defaultInput : 'No default microphone · choose device'}</option>{devices.inputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
-          <label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">{defaultOutput ? 'Windows default · ' + defaultOutput : 'No default output · choose device'}</option>{devices.outputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label>
-          <div className="device-hint">Using Windows defaults only selects the current devices for this test. AsySounds does not change your system settings.</div>
+          {outputMode === 'monitor' ? <label>Listen through<select value={output} onChange={event => setOutput(event.target.value)} disabled={preview.running}><option value="">{defaultOutput ? 'Windows default · ' + defaultOutput : 'No default output · choose device'}</option>{devices.outputs.map((name,index) => <option value={name} key={name + index}>{name}</option>)}</select></label> : <label>Virtual cable playback (CABLE Input)<select value={selectedCableRoute?.playback ?? ''} onChange={event => setCableOutput(event.target.value)} disabled={preview.running || busy}><option value="">{readyCableRoutes.length ? 'Select an available cable' : 'No complete virtual cable found'}</option>{readyCableRoutes.map(route => <option key={route.playback} value={route.playback}>{route.playback}</option>)}</select></label>}
+          <div className="device-hint">{outputMode === 'monitor' ? 'Using Windows defaults only selects the current devices for this test. AsySounds does not change your system settings.' : selectedCableRoute ? <>Recording endpoint: <strong>{selectedCableRoute.capture}</strong>. Select this exact device as the microphone in OBS or Discord. AsySounds never changes the Windows default microphone.</> : <>Both playback CABLE Input and recording CABLE Output must be active. <a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener noreferrer">Official VB-CABLE driver</a> (manual installation and restart may be required). Refresh devices after installation. No driver is installed automatically.</>}</div>
         </div>
         <div className="simple-suppression">
           <div className="suppression-top"><div><span className="eyebrow">RNNOISE · LOCAL NEURAL PROCESSING</span><h3>Neural noise suppression</h3></div><div className="suppression-value"><strong>{noiseStrength}%</strong><small>{strengthLabel(noiseStrength)}</small></div></div>
@@ -277,12 +294,12 @@ function App() {
           <div className="simple-level"><span>Input</span><div className="meter-track"><div style={{width: (preview.running ? Math.min(100, preview.raw_peak * 100) : 0) + '%'}}/></div></div>
           <div className="simple-level"><span>Processed</span><div className="meter-track processed-track"><div style={{width: (preview.running ? Math.min(100, preview.peak * 100) : 0) + '%'}}/></div></div>
           <div className="signal-stats"><span><i className={preview.running && !preview.failed ? 'ok-dot' : 'idle-dot'}/>{preview.running ? (preview.failed ? 'Stream issue' : 'Processing locally') : 'Preview inactive'}</span><span>{preview.running ? 'RNNoise ' + preview.inference_us + ' µs / frame' : '48 kHz neural engine'}</span></div>
-          <label className="monitor-toggle"><input type="checkbox" checked={monitorEnabled} disabled={!preview.running || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onChange={event => setMonitorEnabled(event.target.checked)}/><span>Hear processed audio live <small>Off keeps the DSP and A/B recorder running, but silences headphone playback.</small></span></label>
+          <label className="monitor-toggle"><input type="checkbox" checked={monitorEnabled} disabled={!preview.running || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onChange={event => setMonitorEnabled(event.target.checked)}/><span>{outputMode === 'cable' ? 'Send processed microphone to cable' : 'Hear processed audio live'} <small>Off keeps DSP and A/B recording running, but silences the selected output {outputMode === 'cable' ? '(including Discord/OBS input)' : '(headphones)'}.</small></span></label>
           <div className="simple-actions">
-            <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? 'Stop listening' : 'Test microphone'}</button>
+            <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? (outputMode === 'cable' ? 'Stop virtual microphone' : 'Stop listening') : (outputMode === 'cable' ? 'Start processed microphone' : 'Test microphone')}</button>
             <button className={'compare-button' + (bypass ? ' comparing' : '')} disabled={!preview.running || busy} aria-pressed={bypass} onClick={() => setBypass(current => !current)}>{bypass ? 'Original sound • ON' : 'Compare original sound'}</button>
           </div>
-          <small className="simple-disclaimer">Use headphones to prevent feedback. If you still hear clicks when the preview is stopped, the sound comes from another monitor path (headset sidetone, Windows Listen or Sonar), not this filter.</small>
+          <small className="simple-disclaimer">{outputMode === 'cable' ? 'Route only to your chosen virtual cable. In Discord/OBS choose its matching recording endpoint; do not also capture the physical mic or you may hear doubled audio. Stop the route before unplugging devices.' : 'Use headphones to prevent feedback. If you still hear clicks when the preview is stopped, the sound comes from another monitor path (headset sidetone, Windows Listen or Sonar), not this filter.'}</small>
         </div>
         <section className="tuning-card diagnostic-card" aria-label="Record an original and processed comparison">
           <div className="tuning-head"><div><span className="eyebrow">REAL MICROPHONE CHECK</span><h3>Compare the same 5-second recording</h3></div><span className="prototype-tag">LOCAL ONLY</span></div>
@@ -304,16 +321,16 @@ function App() {
             </div>
             <small>Negative dB means the processed clip is quieter overall. These are whole-clip signal levels, not a noise-removal score: listen for remaining clicks and any lost syllables.</small>
           </>}
-          <small>If both clips differ but you still hear the original sound live, check hardware sidetone, Windows “Listen to this device”, or Sonar monitoring. This is still a preview, not a virtual microphone for Discord/OBS.</small>
+          <small>If the processed clip differs but you still hear the original live, check hardware sidetone, Windows “Listen to this device”, or Sonar monitoring. A virtual cable output works only when a matching driver is installed and selected in the destination app.</small>
         </section>
         <section className="voice-tuning" aria-label="Voice cleanup and clarity">
           <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">TRANSIENT CONTROL</span><h3>Clap & impact filter</h3></div><strong>{impactStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={impactStrength} aria-label="Clap and impact suppression" onChange={event => { setImpactStrength(Number(event.target.value)); setBypass(false); }}/><small>Reduces isolated claps, clicks and short impacts. During speech it uses gentler reduction to protect words. {preview.running ? "Impacts detected: " + preview.impact_events : ""}</small></div>
-          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); setClarityCompareOff(false); }}/><small>Vocal EQ: +{(6 * clarityStrength / 100).toFixed(1)} dB at 3 kHz, −{(3.5 * clarityStrength / 100).toFixed(1)} dB at 320 Hz. Compare ON/OFF on the same preview; Discord and OBS are not affected.</small><button type="button" className={"compare-button" + (clarityCompareOff ? " comparing" : "")} disabled={!preview.running || busy || bypass} aria-pressed={clarityCompareOff} onClick={() => setClarityCompareOff(value => !value)}>{clarityCompareOff ? "A/B: clarity OFF · tap for ON" : "A/B: clarity ON · tap for OFF"}</button></div>
+          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); setClarityCompareOff(false); }}/><small>Vocal EQ: +{(6 * clarityStrength / 100).toFixed(1)} dB at 3 kHz, −{(3.5 * clarityStrength / 100).toFixed(1)} dB at 320 Hz. Compare ON/OFF on the same stream; a configured virtual cable receives the changes.</small><button type="button" className={"compare-button" + (clarityCompareOff ? " comparing" : "")} disabled={!preview.running || busy || bypass} aria-pressed={clarityCompareOff} onClick={() => setClarityCompareOff(value => !value)}>{clarityCompareOff ? "A/B: clarity OFF · tap for ON" : "A/B: clarity ON · tap for OFF"}</button></div>
         </section>
         <details className="advanced-panel">
           <summary>Advanced settings <span>Optional</span></summary>
           <div className="advanced-content">
-            <p>Fine-tune only if you want to. These controls apply to the live preview.</p>
+            <p>Fine-tune only if you want to. These controls apply to the active processed stream.</p>
             <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setImpactStrength(defaultImpactStrength); setClarityStrength(defaultClarityStrength); setClarityCompareOff(false); setBypass(false);}}>Reset settings</button></div>
             <div className="voice-controls">
               {([
@@ -329,7 +346,7 @@ function App() {
             {preview.running && <div className="telemetry"><span>Input {preview.sample_rate.toLocaleString()} Hz</span><span>Output {preview.output_sample_rate.toLocaleString()} Hz</span><span>Buffered: {preview.buffered_ms} ms</span><span>Overflow: {preview.overflow_samples.toLocaleString()}</span><span>Underflow: {preview.underflow_samples.toLocaleString()}</span><span>Device glitches: {preview.device_xruns.toLocaleString()}</span><span>RNNoise frame: {preview.inference_us} µs / 10,000 µs</span><span>Voice probability: {Math.round(preview.voice_probability * 100)}%</span></div>}
           </div>
         </details>
-        <p className="limitation">RNNoise and the impact filter run locally at 48 kHz. Claps during speech may still be audible; this preview does not alter Discord, OBS or the Windows default microphone.</p>
+        <p className="limitation">RNNoise and the impact filter run locally at 48 kHz. Claps during speech may still be audible. Virtual cable mode sends processed audio to an existing virtual playback endpoint; it does not create a Windows audio driver or change your default microphone.</p>
       </section>}
       {view === 'Devices' && <section className="device-panel">
         <div className="panel-heading"><div><span className="eyebrow">CONNECTED AUDIO</span><h2>Your devices, clearly organized.</h2><p>Choose what AsySounds uses for microphone preview without changing Windows or Sonar.</p></div><button className="secondary" onClick={() => void refreshDevices()} disabled={preview.running}>↻ Refresh</button></div>
@@ -361,7 +378,7 @@ function App() {
         </div>)}</div>
         <small className="simple-disclaimer">Windows session volumes may also change in Volume Mixer or another application. This is real volume control, not independent virtual audio routing.</small>
       </section>}
-      {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. Persistent mixer routing, virtual channels and profiles are in development. Microphone preview preferences are saved locally.</p></section>}
+      {view === 'Settings' && <section className="voice-panel"><span className="eyebrow">ENGINE STATUS</span><h2>Development build</h2><p>Local RNNoise suppression, adjustable live intensity, dry comparison and explicit-device preview are available. An existing VB-CABLE pair can transport the processed microphone to other applications. AsySounds does not install a driver, change system defaults or provide its own virtual endpoint yet. Persistent mixer routing, virtual channels and profiles are in development. Microphone settings are saved locally.</p></section>}
     </main>
   </div>;
 }

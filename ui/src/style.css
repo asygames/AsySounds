@@ -244,3 +244,12 @@ main > header > div { min-width:0; }
 .diagnostic-metrics>div{display:grid;gap:7px;padding:13px 15px;border:1px solid #494065;border-radius:12px;background:#141b2e;min-width:0}
 .diagnostic-metrics strong{color:#d0c1ff;font-size:22px;font-variant-numeric:tabular-nums}
 .diagnostic-metrics span{color:#aeb6ce;font-size:12px;line-height:1.5}
+.output-modes{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,235px),1fr));gap:12px;grid-column:1/-1}
+.output-mode{display:grid;gap:7px;text-align:left;min-width:0;padding:16px 18px;background:#121829;color:#e9e8f5;border:1px solid #3b4156;border-radius:13px;transition:border-color .16s,background .16s,transform .16s}
+.output-mode:hover:not(:disabled){border-color:#9f90eb;transform:translateY(-1px)}
+.output-mode.selected{background:linear-gradient(135deg,#282141,#172c39);border-color:#9c83fa;box-shadow:inset 0 0 0 1px #7365c43b}
+.output-mode strong{font-size:14px}
+.output-mode small{font-size:12px;font-weight:400;line-height:1.5;color:#aeb6ce}
+.output-mode:disabled{opacity:.7;cursor:not-allowed}
+.device-hint a{color:#c7b6ff;text-underline-offset:3px}
+.device-hint strong{color:#dbd1ff;overflow-wrap:anywhere}

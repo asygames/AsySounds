@@ -1,4 +1,5 @@
 use asysounds_core::audio_sessions::{list_audio_sessions, set_audio_session};
+use asysounds_core::cable::find_cable_routes;
 use asysounds_core::neural_monitor::{NeuralVoiceMonitor, list_devices};
 use asysounds_core::voice::VoiceSettings;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -55,6 +56,20 @@ struct DeviceList {
     outputs: Vec<String>,
     default_input: Option<String>,
     default_output: Option<String>,
+    cable_routes: Vec<CableRouteInfo>,
+}
+
+#[derive(Serialize)]
+struct CableRouteInfo {
+    playback: String,
+    capture: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OutputMode {
+    Monitor,
+    Cable,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -210,11 +225,19 @@ fn take_diagnostic(state: State<'_, PreviewState>) -> Result<DiagnosticAudio, St
 #[tauri::command]
 fn audio_devices() -> Result<DeviceList, String> {
     let devices = list_devices()?;
+    let cable_routes = find_cable_routes(&devices.inputs, &devices.outputs)
+        .into_iter()
+        .map(|route| CableRouteInfo {
+            playback: route.playback,
+            capture: route.capture,
+        })
+        .collect();
     Ok(DeviceList {
         inputs: devices.inputs,
         outputs: devices.outputs,
         default_input: devices.default_input,
         default_output: devices.default_output,
+        cable_routes,
     })
 }
 
@@ -230,6 +253,7 @@ fn start_preview(
     impact_strength: u8,
     clarity_strength: u8,
     monitor_enabled: bool,
+    output_mode: OutputMode,
     state: State<'_, PreviewState>,
 ) -> Result<(), String> {
     let mut guard = state
@@ -238,6 +262,20 @@ fn start_preview(
         .map_err(|_| "Preview state unavailable".to_owned())?;
     if guard.is_some() {
         return Err("Preview is already running".into());
+    }
+    if matches!(output_mode, OutputMode::Cable) {
+        // Never silently send microphone audio to speakers because a saved
+        // cable name disappeared or the capture half of the driver is disabled.
+        let devices = list_devices()?;
+        let route = find_cable_routes(&devices.inputs, &devices.outputs)
+            .into_iter()
+            .find(|candidate| candidate.playback == output && candidate.capture.is_some())
+            .ok_or_else(|| "No complete virtual cable route is available. Refresh devices; select a CABLE Input with a matching CABLE Output recording endpoint.".to_owned())?;
+        if route.capture.as_deref() == Some(input.as_str()) {
+            return Err(
+                "The input cannot be the same cable's capture endpoint (feedback loop)".into(),
+            );
+        }
     }
     let monitor = NeuralVoiceMonitor::start(
         &input,

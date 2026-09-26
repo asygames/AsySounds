@@ -1,0 +1,84 @@
+name: AsySounds Windows build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: asysounds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ui/src-tauri
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix ui
+      - name: Verify core formatting and quality
+        shell: pwsh
+        run: |
+          cargo fmt --all --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --all-targets --locked -- -D warnings
+          exit $LASTEXITCODE
+      - name: Test Rust core and cable matching
+        run: cargo test --locked
+      - name: Test Tauri integration
+        run: cargo test --locked --manifest-path ui/src-tauri/Cargo.toml --lib
+      - name: Build React UI
+        run: npm run build --prefix ui
+      - name: Build Windows GUI executable
+        run: cargo build --release --locked --manifest-path ui/src-tauri/Cargo.toml --bin asysounds
+      - name: Package portable Windows build
+        shell: pwsh
+        run: |
+          $destination = 'AsySounds-windows-x64'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Copy-Item 'ui/src-tauri/target/release/asysounds.exe' "$destination/AsySounds.exe"
+          Copy-Item 'README.md' "$destination/README.md"
+          Copy-Item 'LICENSE' "$destination/LICENSE"
+          Copy-Item 'docs/licenses/nnnoiseless-COPYING' "$destination/nnnoiseless-COPYING"
+          Compress-Archive -Path "$destination/*" -DestinationPath 'AsySounds-windows-x64.zip' -Force
+      - name: Upload tested Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: AsySounds-windows-x64
+          path: AsySounds-windows-x64.zip
+          if-no-files-found: error
+      - name: Verify structured release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $notes = "docs/releases/${{ github.ref_name }}.md"
+          if (-not (Test-Path $notes)) { throw "Missing release notes: $notes" }
+      - name: Publish GitHub release with asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AsySounds ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          files: AsySounds-windows-x64.zip
+          fail_on_unmatched_files: true
