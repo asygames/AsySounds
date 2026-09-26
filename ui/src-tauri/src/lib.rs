@@ -121,6 +121,7 @@ struct PreviewStatus {
 struct DiagnosticAudio {
     original_wav: String,
     neural_wav: String,
+    before_impact_wav: String,
     transient_wav: String,
     processed_wav: String,
     metrics: DiagnosticMetrics,
@@ -136,6 +137,7 @@ struct DiagnosticMetrics {
     rms_change_db: f32,
     peak_change_db: f32,
     neural_rms_change_db: f32,
+    before_impact_rms_change_db: f32,
     transient_rms_change_db: f32,
 }
 
@@ -171,6 +173,7 @@ fn diagnostic_metrics(original: &[i16], processed: &[i16]) -> DiagnosticMetrics 
         rms_change_db: processed_rms_dbfs - original_rms_dbfs,
         peak_change_db: processed_peak_dbfs - original_peak_dbfs,
         neural_rms_change_db: 0.0,
+        before_impact_rms_change_db: 0.0,
         transient_rms_change_db: 0.0,
     }
 }
@@ -221,6 +224,7 @@ fn take_diagnostic(state: State<'_, PreviewState>) -> Result<DiagnosticAudio, St
     let length = tracks.original.len();
     if length != 240_000
         || tracks.neural.len() != length
+        || tracks.before_impact.len() != length
         || tracks.transient.len() != length
         || tracks.processed.len() != length
     {
@@ -229,12 +233,15 @@ fn take_diagnostic(state: State<'_, PreviewState>) -> Result<DiagnosticAudio, St
     let mut metrics = diagnostic_metrics(&tracks.original, &tracks.processed);
     metrics.neural_rms_change_db =
         diagnostic_metrics(&tracks.original, &tracks.neural).rms_change_db;
+    metrics.before_impact_rms_change_db =
+        diagnostic_metrics(&tracks.original, &tracks.before_impact).rms_change_db;
     metrics.transient_rms_change_db =
         diagnostic_metrics(&tracks.original, &tracks.transient).rms_change_db;
     Ok(DiagnosticAudio {
         metrics,
         original_wav: wav_data_url(&tracks.original),
         neural_wav: wav_data_url(&tracks.neural),
+        before_impact_wav: wav_data_url(&tracks.before_impact),
         transient_wav: wav_data_url(&tracks.transient),
         processed_wav: wav_data_url(&tracks.processed),
     })

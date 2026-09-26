@@ -13,6 +13,7 @@ pub struct NeuralSuppressor {
     wet_pcm: [f32; FRAME_SIZE],
     previous_dry: [f32; FRAME_SIZE],
     neural_only: [f32; FRAME_SIZE], // same-timeline blend before VAD and impact
+    before_impact: [f32; FRAME_SIZE], // after VAD, before transient attenuation
     primed: bool,
     vad_gain: f32,
     previous_vad: f32,
@@ -27,6 +28,7 @@ impl NeuralSuppressor {
             wet_pcm: [0.0; FRAME_SIZE],
             previous_dry: [0.0; FRAME_SIZE],
             neural_only: [0.0; FRAME_SIZE],
+            before_impact: [0.0; FRAME_SIZE],
             primed: false,
             vad_gain: 1.0,
             previous_vad: 0.0,
@@ -41,6 +43,10 @@ impl NeuralSuppressor {
     /// Diagnostic reference from the last processed frame; never modifies the live route.
     pub fn neural_only(&self) -> &[f32; FRAME_SIZE] {
         &self.neural_only
+    }
+
+    pub fn before_impact(&self) -> &[f32; FRAME_SIZE] {
+        &self.before_impact
     }
 
     /// Denoise one complete frame. Strength mixes time-aligned dry and wet signals.
@@ -65,6 +71,7 @@ impl NeuralSuppressor {
         if !self.primed {
             output.fill(0.0); // Discard RNNoise's first-frame synthesis artefacts.
             self.neural_only.fill(0.0);
+            self.before_impact.fill(0.0);
             self.primed = true;
         } else {
             // At the old 55% setting almost half the unprocessed clap leaked through.
@@ -72,8 +79,10 @@ impl NeuralSuppressor {
             let mix = if bypass { 0.0 } else { wet_mix(strength) };
             // Residual gate only reacts to RNNoise's speech estimate, not raw volume.
             // Moderate settings are deliberately forgiving of quiet speech.
+            // Preserve quiet speech: the old default residual gate modulated
+            // vowels at the 10-ms frame rate. Enable only mild gating above 85%.
             let gate_strength =
-                ((f32::from(strength.min(100)) / 100.0 - 0.60) / 0.40).clamp(0.0, 1.0);
+                ((f32::from(strength.min(100)) / 100.0 - 0.85) / 0.15).clamp(0.0, 1.0) * 0.25;
             // A stronger setting requires higher speech confidence before opening
             // the residual gate; low-strength settings preserve faint speech.
             let voice_threshold = 0.28 + 0.27 * gate_strength;
@@ -100,6 +109,7 @@ impl NeuralSuppressor {
                 };
                 *dst = (neural * gate).clamp(-1.0, 1.0);
             }
+            self.before_impact.copy_from_slice(output);
             self.impact.process_frame(
                 &self.previous_dry,
                 output,
@@ -178,6 +188,17 @@ mod tests {
         let wet_energy: f32 = output.iter().map(|x| x * x).sum();
         assert!(wet_energy < dry_energy * 0.01, "low-energy click leaked");
         assert_eq!(suppressor.impact_events(), 1);
+    }
+    #[test]
+    fn normal_suppression_does_not_apply_a_residual_vad_gate() {
+        let mut suppressor = NeuralSuppressor::new();
+        let input = [0.02_f32; FRAME_SIZE];
+        let mut output = [0.0_f32; FRAME_SIZE];
+        for _ in 0..16 {
+            suppressor.process_frame(&input, &mut output, 65, 0, false);
+            assert_eq!(suppressor.neural_only(), suppressor.before_impact());
+            assert_eq!(&output, suppressor.before_impact());
+        }
     }
     #[test]
     fn rnnoise_frame_is_ten_milliseconds() {

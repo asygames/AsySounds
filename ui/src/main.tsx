@@ -11,7 +11,7 @@ type Devices = { inputs: string[]; outputs: string[]; default_input: string | nu
 type VoiceSettings = { high_pass_hz: number; gate_threshold_db: number; compressor_threshold_db: number; compressor_ratio: number; makeup_db: number };
 const defaultVoiceSettings: VoiceSettings = { high_pass_hz: 85, gate_threshold_db: -80, compressor_threshold_db: -20, compressor_ratio: 3, makeup_db: 3 };
 const defaultNoiseStrength = 65;
-const defaultImpactStrength = 85;
+const defaultImpactStrength = 45;
 const defaultClarityStrength = 55;
 const microphoneStorageKey = 'asysounds:microphone:v1';
 const mixerStorageKey = 'asysounds:mixer:v1';
@@ -75,8 +75,8 @@ function readSavedMicrophone(): SavedMicrophone {
 // Strength controls the local RNNoise neural model, not the legacy gate threshold.
 const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
 type Preview = { running: boolean; neural_enabled: boolean; monitor_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; diagnostic_remaining_ms: number; diagnostic_ready: boolean; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
-type DiagnosticMetrics = { original_rms_dbfs: number; processed_rms_dbfs: number; original_peak_dbfs: number; processed_peak_dbfs: number; rms_change_db: number; peak_change_db: number; neural_rms_change_db: number; transient_rms_change_db: number };
-type DiagnosticAudio = { original_wav: string; neural_wav: string; transient_wav: string; processed_wav: string; metrics: DiagnosticMetrics };
+type DiagnosticMetrics = { original_rms_dbfs: number; processed_rms_dbfs: number; original_peak_dbfs: number; processed_peak_dbfs: number; rms_change_db: number; peak_change_db: number; neural_rms_change_db: number; before_impact_rms_change_db: number; transient_rms_change_db: number };
+type DiagnosticAudio = { original_wav: string; neural_wav: string; before_impact_wav: string; transient_wav: string; processed_wav: string; metrics: DiagnosticMetrics };
 const signedDb = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)} dB`;
 
 const emptyPreview: Preview = { running: false, neural_enabled: false, monitor_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, diagnostic_remaining_ms: 0, diagnostic_ready: false, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
@@ -289,7 +289,7 @@ function App() {
         <button key={name} className={'nav ' + (view === name ? 'active' : '')} onClick={() => setView(name)}>
           <span aria-hidden="true">{['◫', '◉', '⌁', '⚙'][index]}</span>{name}
         </button>)}</nav>
-      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.3</small></div>
+      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.4</small></div>
     </aside>
     <main>
       <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Local noise, impact and voice clarity controls.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? (outputMode === 'cable' ? 'PROCESSED MIC ROUTING' : 'LIVE VOICE PREVIEW') : 'LOCAL AUDIO ENGINE'}</span></header>
@@ -326,30 +326,31 @@ function App() {
         </div>
         <section className="tuning-card diagnostic-card" aria-label="Record an original and processed comparison">
           <div className="tuning-head"><div><span className="eyebrow">REAL MICROPHONE CHECK</span><h3>Compare the same 5-second recording</h3></div><span className="prototype-tag">LOCAL ONLY</span></div>
-          <small>Record only when you choose. Speak and make a click or clap. Four stages are captured from the same 5-second microphone input: original, neural only, after impact filter, and final voice processing. The selected output is muted during recording; nothing is saved or uploaded automatically.</small>
+          <small>Record only when you choose. Speak and make a click or clap. Five stages are captured from the same five-second microphone input: original, neural only, after VAD, after impact filtering, and final processing. The selected output is muted during recording; nothing is saved or uploaded automatically.</small>
           <div className="simple-actions">
             <button className="secondary" disabled={!preview.running || preview.failed || bypass || busy || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onClick={() => void beginDiagnostic()}>{preview.diagnostic_remaining_ms > 0 ? 'Recording · ' + Math.ceil(preview.diagnostic_remaining_ms / 1000) + 's' : 'Record 5 seconds'}</button>
             <button className="compare-button" disabled={!preview.running || !preview.diagnostic_ready || busy || diagnosticBusy} onClick={() => void loadDiagnostic()}>{diagnosticBusy ? 'Preparing comparison…' : 'Finish & compare · stop preview'}</button>
           </div>
-          {preview.diagnostic_remaining_ms > 0 && <small>Capturing all four processing stages on the same timeline…</small>}
-          {preview.diagnostic_ready && <small>Recording ready. Finish & compare stops the route and unlocks all four clips.</small>}
+          {preview.diagnostic_remaining_ms > 0 && <small>Capturing all five processing stages on the same timeline…</small>}
+          {preview.diagnostic_ready && <small>Recording ready. Finish & compare stops the route and unlocks all five clips.</small>}
           {diagnostic && !preview.running && <>
             <div className="diagnostic-players">
               <label><strong>1 · Original microphone</strong><small>No DSP; reference input.</small><audio controls preload="none" src={diagnostic.original_wav}/><a className="diagnostic-download" href={diagnostic.original_wav} download="AsySounds-original.wav">Save original WAV</a></label>
               <label><strong>2 · Neural only</strong><small>RNNoise blend without the residual gate, impact filter, compressor or EQ. RMS {signedDb(diagnostic.metrics.neural_rms_change_db)}.</small><audio controls preload="none" src={diagnostic.neural_wav}/><a className="diagnostic-download" href={diagnostic.neural_wav} download="AsySounds-neural.wav">Save neural WAV</a></label>
-              <label><strong>3 · After impact filter</strong><small>Neural + residual gate + clap/click suppression. RMS {signedDb(diagnostic.metrics.transient_rms_change_db)}.</small><audio controls preload="none" src={diagnostic.transient_wav}/><a className="diagnostic-download" href={diagnostic.transient_wav} download="AsySounds-impact.wav">Save impact WAV</a></label>
-              <label><strong>4 · Final processed</strong><small>Full signal including compressor and clarity EQ. RMS {signedDb(diagnostic.metrics.rms_change_db)}.</small><audio controls preload="none" src={diagnostic.processed_wav}/><a className="diagnostic-download" href={diagnostic.processed_wav} download="AsySounds-final.wav">Save final WAV</a></label>
+              <label><strong>3 · After VAD gate</strong><small>Neural + residual VAD only. RMS {signedDb(diagnostic.metrics.before_impact_rms_change_db)}. The gate is inactive at normal suppression levels.</small><audio controls preload="none" src={diagnostic.before_impact_wav}/><a className="diagnostic-download" href={diagnostic.before_impact_wav} download="AsySounds-vad.wav">Save VAD WAV</a></label>
+              <label><strong>4 · After impact filter</strong><small>VAD + clap/click suppression. RMS {signedDb(diagnostic.metrics.transient_rms_change_db)}.</small><audio controls preload="none" src={diagnostic.transient_wav}/><a className="diagnostic-download" href={diagnostic.transient_wav} download="AsySounds-impact.wav">Save impact WAV</a></label>
+              <label><strong>5 · Final processed</strong><small>Full signal including compressor and clarity EQ. RMS {signedDb(diagnostic.metrics.rms_change_db)}.</small><audio controls preload="none" src={diagnostic.processed_wav}/><a className="diagnostic-download" href={diagnostic.processed_wav} download="AsySounds-final.wav">Save final WAV</a></label>
             </div>
             <div className="diagnostic-metrics" aria-label="Measured levels for the five-second A/B recording">
               <div><small>AVERAGE LEVEL (RMS)</small><strong>{signedDb(diagnostic.metrics.rms_change_db)}</strong><span>Original {diagnostic.metrics.original_rms_dbfs.toFixed(1)} dBFS · Processed {diagnostic.metrics.processed_rms_dbfs.toFixed(1)} dBFS</span></div>
               <div><small>HIGHEST PEAK</small><strong>{signedDb(diagnostic.metrics.peak_change_db)}</strong><span>Original {diagnostic.metrics.original_peak_dbfs.toFixed(1)} dBFS · Processed {diagnostic.metrics.processed_peak_dbfs.toFixed(1)} dBFS</span></div>
             </div>
-            <small>Listen in order. If track 2 already buzzes, investigate neural processing. If only track 3 buzzes, inspect VAD/impact attenuation. If only track 4 buzzes, inspect compressor/EQ. Differences are whole-clip levels, not quality scores. Use Save WAV only when you choose to share a recording.</small>
+            <small>Listen in order. If track 2 already buzzes, investigate neural processing. If track 3 buzzes but track 2 is clean, inspect the VAD gate. If track 4 adds buzzing, inspect impact suppression. If only track 5 changes the voice, inspect the compressor/EQ. For a controlled check set impact to 0% and record again; tracks 3 and 4 should then match. Differences are whole-clip levels, not quality scores. Use Save WAV only when you choose to share a recording.</small>
           </>}
           <small>If the processed clip differs but you still hear the original live, check hardware sidetone, Windows “Listen to this device”, or Sonar monitoring. A virtual cable output works only when a matching driver is installed and selected in the destination app.</small>
         </section>
         <section className="voice-tuning" aria-label="Voice cleanup and clarity">
-          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">TRANSIENT CONTROL</span><h3>Clap & impact filter</h3></div><strong>{impactStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={impactStrength} aria-label="Clap and impact suppression" onChange={event => { setImpactStrength(Number(event.target.value)); setBypass(false); }}/><small>Reduces isolated claps, clicks and short impacts. During speech it uses gentler reduction to protect words. {preview.running ? "Impacts detected: " + preview.impact_events : ""}</small></div>
+          <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">TRANSIENT CONTROL</span><h3>Clap & impact filter</h3></div><strong>{impactStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={impactStrength} aria-label="Clap and impact suppression" onChange={event => { setImpactStrength(Number(event.target.value)); setBypass(false); }}/><small>Targets discrete claps and clicks; protects breathy consonants and limits whole-frame ducking during speech. Strong suppression can still affect overlapping sounds. Start at a lower level and compare WAV stages. {preview.running ? "Impacts detected: " + preview.impact_events : ""}</small></div>
           <div className="tuning-card"><div className="tuning-head"><div><span className="eyebrow">VOICE PRESENCE</span><h3>Voice clarity</h3></div><strong>{clarityStrength}%</strong></div><input type="range" min="0" max="100" step="1" value={clarityStrength} aria-label="Voice clarity" onChange={event => { setClarityStrength(Number(event.target.value)); setBypass(false); setClarityCompareOff(false); }}/><small>Vocal EQ: +{(6 * clarityStrength / 100).toFixed(1)} dB at 3 kHz, −{(3.5 * clarityStrength / 100).toFixed(1)} dB at 320 Hz. Compare ON/OFF on the same stream; a configured virtual cable receives the changes.</small><button type="button" className={"compare-button" + (clarityCompareOff ? " comparing" : "")} disabled={!preview.running || busy || bypass} aria-pressed={clarityCompareOff} onClick={() => setClarityCompareOff(value => !value)}>{clarityCompareOff ? "A/B: clarity OFF · tap for ON" : "A/B: clarity ON · tap for OFF"}</button></div>
         </section>
         <details className="advanced-panel">

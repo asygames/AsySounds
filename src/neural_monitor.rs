@@ -39,15 +39,17 @@ struct DiagnosticCapture {
     remaining_frames: usize,
     original: Vec<i16>,
     neural: Vec<i16>,
+    before_impact: Vec<i16>,
     transient: Vec<i16>,
     processed: Vec<i16>,
     ready: bool,
 }
 
-/// All four tracks share the identical 48 kHz timeline and capture window.
+/// All five tracks share the identical 48 kHz timeline and capture window.
 pub struct DiagnosticTracks {
     pub original: Vec<i16>,
     pub neural: Vec<i16>,
+    pub before_impact: Vec<i16>,
     pub transient: Vec<i16>,
     pub processed: Vec<i16>,
 }
@@ -323,6 +325,7 @@ impl NeuralVoiceMonitor {
             remaining_frames: DIAGNOSTIC_FRAMES,
             original: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
             neural: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
+            before_impact: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
             transient: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
             processed: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
             ready: false,
@@ -346,6 +349,7 @@ impl NeuralVoiceMonitor {
         Ok(DiagnosticTracks {
             original: std::mem::take(&mut state.original),
             neural: std::mem::take(&mut state.neural),
+            before_impact: std::mem::take(&mut state.before_impact),
             transient: std::mem::take(&mut state.transient),
             processed: std::mem::take(&mut state.processed),
         })
@@ -488,6 +492,8 @@ fn worker_loop(
             clip.original.extend(aligned_raw.iter().map(|&x| pcm16(x)));
             clip.neural
                 .extend(noise.neural_only().iter().map(|&x| pcm16(x)));
+            clip.before_impact
+                .extend(noise.before_impact().iter().map(|&x| pcm16(x)));
             clip.transient.extend(transient.iter().map(|&x| pcm16(x)));
             clip.processed.extend(filtered.iter().map(|&x| pcm16(x)));
             clip.remaining_frames -= 1;

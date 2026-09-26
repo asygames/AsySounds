@@ -74,12 +74,15 @@ impl ImpactSuppressor {
         let roughness = movement / magnitude.max(1e-6);
         let crest = peak / rms.max(1e-6);
         let rise = rms / self.background_rms.max(0.0025);
+        // Fricatives (s, sh, f), breathy speech and quiet syllables are
+        // broadband, so roughness must NOT disqualify them as voice. The
+        // previous classifier treated them as claps and repeatedly ducked
+        // entire frames, creating audible modulation/buzz.
         let speech_like = voice_probability.is_finite()
-            && voice_probability > 0.68
-            && roughness < 0.76
-            && crest < 3.5;
+            && voice_probability > 0.45
+            && (peak < 0.35 || (roughness < 0.76 && crest < 3.5));
         if speech_like {
-            self.speech_hangover = 16;
+            self.speech_hangover = 25;
         } else {
             self.speech_hangover = self.speech_hangover.saturating_sub(1);
         }
@@ -109,15 +112,21 @@ impl ImpactSuppressor {
             && (roughness > 0.36 || max_step > (rms * 4.0).max(0.025))
             && active_samples <= 52;
         let narrow_click = narrow_click || sharp_click;
-        let broadband = peak > (self.background_rms * 4.0).max(0.075)
+        // Ordinary breathing and unvoiced consonants are also broadband.
+        // Require a stronger peak for a whole-frame clap classification;
+        // sparse mouse clicks are still handled by the separate narrow path.
+        let broadband = peak > (self.background_rms * 4.0).max(0.18)
             && rms > self.background_rms.max(0.010) * 1.4
             && roughness > 0.74
-            && rise > 1.55
+            && rise > 2.5
             && crest > 1.6;
         // VAD is often high on a clap. A highly tonal voice with a high VAD
         // needs a stronger threshold than a real broadband transient.
-        let impact = if speech_like {
-            sharp_click || (narrow_click && crest > 6.0)
+        let speaking = self.speech_hangover > 0;
+        // In speech, reject frame-wide noise unless it is an exceptional,
+        // loud transient. Otherwise normal consonants sound robotic.
+        let impact = if speaking {
+            sharp_click || (narrow_click && crest > 6.0) || (broadband && peak > 0.40 && rise > 8.0)
         } else {
             narrow_click || broadband
         };
@@ -130,7 +139,6 @@ impl ImpactSuppressor {
             if self.hold == 0 {
                 self.events = self.events.saturating_add(1);
             }
-            let speaking = self.speech_hangover > 0;
             if speaking && narrow_click {
                 // The click occupies only a few samples. Keeping a 10 ms
                 // full-frame 50% duck made the entire syllable noticeably pump.
@@ -138,12 +146,13 @@ impl ImpactSuppressor {
                 self.hold = 0;
                 self.gain = 1.0;
             } else {
-                // Wider claps need a short frame duck, including their first
-                // reflections. During speech remove more of the impact than
-                // the old 0.50 floor, without hard-gating an entire word.
-                let floor = if speaking { 0.18 } else { 0.012 };
+                // When speech overlaps a broad clap, prioritize voice
+                // continuity: limit attenuation and never hold a reduced
+                // whole-frame gain across later syllables. Alone, claps
+                // retain the stronger transient/reverberation suppression.
+                let floor = if speaking { 0.50 } else { 0.012 };
                 self.gain = (1.0 - (1.0 - floor) * intensity).min(self.gain);
-                self.hold = if speaking { 2 } else { 7 };
+                self.hold = if speaking { 0 } else { 7 };
             }
         } else if self.hold > 0 {
             self.hold -= 1;
@@ -278,7 +287,7 @@ mod tests {
         assert!((out[460] - input[460]).abs() < 1e-6);
     }
     #[test]
-    fn broadband_clap_during_speech_is_more_than_half_attenuated() {
+    fn broadband_clap_over_speech_is_reduced_without_hard_gating() {
         let mut filter = ImpactSuppressor::new();
         for _ in 0..4 {
             let input = tone();
@@ -288,8 +297,8 @@ mod tests {
         let input = clap();
         let mut out = input;
         filter.process_frame(&input, &mut out, 0.95, 100, false);
-        assert!(power(&out) < power(&input) * 0.07);
-        assert!(power(&out) > power(&input) * 0.02); // no hard gate over voice
+        assert!(power(&out) < power(&input) * 0.50);
+        assert!(power(&out) > power(&input) * 0.15); // preserve overlapping syllables
     }
     #[test]
     fn simultaneous_voiced_tone_and_broadband_clap_is_detected() {
@@ -310,8 +319,53 @@ mod tests {
             1,
             "clap overlapping speech must be detected"
         );
-        assert!(power(&out) < power(&mixed) * 0.15);
+        assert!(power(&out) < power(&mixed) * 0.50);
+        assert!(power(&out) > power(&mixed) * 0.15);
     }
+    #[test]
+    fn breathy_fricative_speech_is_not_misclassified_as_repeated_claps() {
+        let mut filter = ImpactSuppressor::new();
+        for _ in 0..6 {
+            let input = tone();
+            let mut output = input;
+            filter.process_frame(&input, &mut output, 0.90, 100, false);
+        }
+        let mut seed = 0x8FAC_1257_u32;
+        for _ in 0..35 {
+            let input: [f32; FRAME_SIZE] = std::array::from_fn(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (((seed >> 16) as i32 - 32768) as f32 / 32768.0) * 0.12
+            });
+            let mut output = input;
+            filter.process_frame(&input, &mut output, 0.65, 100, false);
+            assert!(
+                power(&output) > power(&input) * 0.93,
+                "fricative speech was ducked"
+            );
+        }
+        assert_eq!(filter.events(), 0, "normal fricatives counted as impacts");
+    }
+
+    #[test]
+    fn isolated_breath_like_noise_is_not_mistaken_for_a_clap() {
+        let mut filter = ImpactSuppressor::new();
+        let mut seed = 0x8FAC_1257_u32;
+        for _ in 0..24 {
+            let input: [f32; FRAME_SIZE] = std::array::from_fn(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (((seed >> 16) as i32 - 32768) as f32 / 32768.0) * 0.12
+            });
+            let mut output = input;
+            filter.process_frame(&input, &mut output, 0.1, 100, false);
+            assert!(power(&output) > power(&input) * 0.93);
+        }
+        assert_eq!(filter.events(), 0);
+    }
+
     #[test]
     fn modest_mouse_click_over_speech_is_caught_without_muting_word() {
         let mut filter = ImpactSuppressor::new();
