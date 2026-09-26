@@ -58,9 +58,19 @@ jobs:
           $destination = 'AsySounds-windows-x64'
           New-Item -ItemType Directory -Force -Path $destination | Out-Null
           $loader = 'ui/src-tauri/target/release/WebView2Loader.dll'
-          if (-not (Test-Path $loader)) { throw 'Missing WebView2Loader.dll: portable app would fail to start' }
           Copy-Item 'ui/src-tauri/target/release/asysounds.exe' "$destination/AsySounds.exe"
-          Copy-Item $loader "$destination/WebView2Loader.dll"
+          if (Test-Path $loader) {
+            # GNU/LLVM dynamic loader builds need this DLL next to the exe.
+            Copy-Item $loader "$destination/WebView2Loader.dll"
+            Write-Host 'Included dynamically linked WebView2Loader.dll.'
+          } else {
+            # GitHub's MSVC target uses the static WebView2 loader library.
+            $hostTriple = (rustc -vV | Select-String '^host: ').ToString()
+            if ($hostTriple -notmatch 'x86_64-pc-windows-msvc') {
+              throw "WebView2Loader.dll not found for $hostTriple"
+            }
+            Write-Host 'MSVC build: WebView2 loader is statically linked; no separate DLL emitted.'
+          }
           Copy-Item 'README.md' "$destination/README.md"
           Copy-Item 'LICENSE' "$destination/LICENSE"
           Copy-Item 'docs/licenses/nnnoiseless-COPYING' "$destination/nnnoiseless-COPYING"

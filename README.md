@@ -42,7 +42,7 @@ A virtual cable is a dependency, **not** an AsySounds-owned signed virtual micro
 
 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cd ui && npm run build`, and `cd ui/src-tauri && cargo test`.
 
-**Portable Windows packaging:** build the production app with `npm run tauri --prefix ui -- build --no-bundle --ci` from the repository root. Do **not** distribute an executable built with plain `cargo build`: it may still target the development server (`localhost`). Package both `ui/src-tauri/target/release/asysounds.exe` and `ui/src-tauri/target/release/WebView2Loader.dll` together; the installed Microsoft WebView2 Runtime is a separate prerequisite. The Windows GitHub Actions workflow enforces these requirements.
+**Portable Windows packaging:** build the production app with `npm run tauri --prefix ui -- build --no-bundle --ci` from the repository root. Do **not** distribute an executable built with plain `cargo build`: it may still target the development server (`localhost`). Package the generated `ui/src-tauri/target/release/asysounds.exe` and include `WebView2Loader.dll` beside it **when the compiler emits that DLL** (as in the locally tested GNU/LLVM build). GitHub's MSVC build statically links the loader and does not emit a separate DLL. The installed Microsoft WebView2 Runtime is a separate prerequisite. The Windows GitHub Actions workflow handles both variants.
 
 The production Tauri WebView has a restrictive Content Security Policy (local assets, IPC and in-memory diagnostic audio). UI telemetry polls at 4 Hz when visible and 1 Hz in the background, with no overlapping requests; unchanged voice settings are not needlessly recomputed on every DSP frame.
 
