@@ -2,7 +2,7 @@
 //! This filter/expander/compressor cannot remove noise that overlaps speech.
 use std::f32::consts::PI;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoiceSettings {
     pub high_pass_hz: f32,
     pub gate_threshold_db: f32,

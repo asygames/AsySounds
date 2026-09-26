@@ -181,14 +181,25 @@ function App() {
 
   useEffect(() => {
     if (!preview.running) return;
+    let inFlight = false;
+    let stopped = false;
+    let tick = 0;
+    // 4 status reads/second while visible, 1/second in the background.
+    // Never overlap IPC requests when the WebView or audio worker is busy.
     const timer = window.setInterval(async () => {
+      if (inFlight || stopped || (document.hidden && (++tick % 4 !== 0))) return;
+      inFlight = true;
       try {
         const status = await invoke<Preview>('preview_status');
-        setPreview(status);
-        if (status.failed) setMessage(status.error ?? 'The audio device disconnected or its stream failed. Stop and refresh devices.');
-      } catch (error) { setMessage(String(error)); }
-    }, 120);
-    return () => window.clearInterval(timer);
+        if (!stopped) {
+          setPreview(status);
+          if (status.failed) setMessage(status.error ?? 'The audio device disconnected or its stream failed. Stop and refresh devices.');
+        }
+      } catch (error) {
+        if (!stopped) setMessage(String(error));
+      } finally { inFlight = false; }
+    }, 250);
+    return () => { stopped = true; window.clearInterval(timer); };
   }, [preview.running]);
 
   useEffect(() => {
@@ -267,7 +278,7 @@ function App() {
         <button key={name} className={'nav ' + (view === name ? 'active' : '')} onClick={() => setView(name)}>
           <span aria-hidden="true">{['◫', '◉', '⌁', '⚙'][index]}</span>{name}
         </button>)}</nav>
-      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.1</small></div>
+      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.2</small></div>
     </aside>
     <main>
       <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Local noise, impact and voice clarity controls.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? (outputMode === 'cable' ? 'PROCESSED MIC ROUTING' : 'LIVE VOICE PREVIEW') : 'LOCAL AUDIO ENGINE'}</span></header>

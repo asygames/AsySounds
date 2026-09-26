@@ -208,10 +208,10 @@ main > header > div { min-width:0; }
 .device-grid .device-hint { grid-column:1/-1; }
 @container main-pane (min-width: 760px) {
   .simple-voice-panel { grid-template-columns:minmax(0,1.08fr) minmax(0,.92fr); column-gap:clamp(18px,2vw,30px); }
-  .simple-voice-panel > .panel-heading,.simple-voice-panel > .compact-devices,
+  .simple-voice-panel > .panel-heading,.simple-voice-panel > .output-modes,.simple-voice-panel > .compact-devices,
   .simple-voice-panel > .voice-tuning,.simple-voice-panel > .advanced-panel,.simple-voice-panel > .limitation { grid-column:1/-1; }
   .simple-voice-panel > .simple-suppression { grid-column:1; }
-  .simple-voice-panel > .simple-preview { grid-column:2; grid-row:3; }
+  .simple-voice-panel > .simple-preview { grid-column:2; grid-row:auto; }
 }
 @container main-pane (max-width: 680px) {
   .panel-heading { align-items:stretch; }

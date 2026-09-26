@@ -50,14 +50,17 @@ jobs:
         run: cargo test --locked --manifest-path ui/src-tauri/Cargo.toml --lib
       - name: Build React UI
         run: npm run build --prefix ui
-      - name: Build Windows GUI executable
-        run: cargo build --release --locked --manifest-path ui/src-tauri/Cargo.toml --bin asysounds
+      - name: Build Windows GUI executable with bundled frontend
+        run: npm run tauri --prefix ui -- build --no-bundle --ci
       - name: Package portable Windows build
         shell: pwsh
         run: |
           $destination = 'AsySounds-windows-x64'
           New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          $loader = 'ui/src-tauri/target/release/WebView2Loader.dll'
+          if (-not (Test-Path $loader)) { throw 'Missing WebView2Loader.dll: portable app would fail to start' }
           Copy-Item 'ui/src-tauri/target/release/asysounds.exe' "$destination/AsySounds.exe"
+          Copy-Item $loader "$destination/WebView2Loader.dll"
           Copy-Item 'README.md' "$destination/README.md"
           Copy-Item 'LICENSE' "$destination/LICENSE"
           Copy-Item 'docs/licenses/nnnoiseless-COPYING' "$destination/nnnoiseless-COPYING"

@@ -406,6 +406,9 @@ fn worker_loop(
     let mut frame = [0.0_f32; FRAME_SIZE];
     let mut filtered = [0.0_f32; FRAME_SIZE];
     let mut bypass_previous = false;
+    // EQ coefficients and makeup gain only need recalculation on actual changes,
+    // not on every 10 ms audio block.
+    let mut applied_settings: Option<VoiceSettings> = None;
     let estimated_source_frame = ((FRAME_SIZE as f64 * input_rate as f64 / SAMPLE_RATE as f64)
         .ceil() as usize)
         .saturating_add(3);
@@ -454,7 +457,10 @@ fn worker_loop(
             bypass_previous = controls_now.bypass;
         }
         if !controls_now.bypass {
-            voice.set_settings(controls_now.settings);
+            if applied_settings != Some(controls_now.settings) {
+                voice.set_settings(controls_now.settings);
+                applied_settings = Some(controls_now.settings);
+            }
             voice.process_in_place(&mut filtered);
             clarity.process_in_place(&mut filtered, controls_now.clarity_strength);
         }
@@ -570,17 +576,18 @@ where
                 let correction = ((queued - SAMPLE_RATE as f64 * 0.03) / SAMPLE_RATE as f64 * 0.1)
                     .clamp(-0.003, 0.003);
                 let mut missing = 0_u64;
+                // A single atomic read per callback avoids a shared-memory read
+                // per sample. The gain still ramps smoothly for ~10 ms.
+                let target = if shared.monitor_enabled.load(Ordering::Acquire) {
+                    1.0
+                } else {
+                    0.0
+                };
                 for frame in data.chunks_exact_mut(channels) {
                     let (sample, lost) = resampler.next(|| consumer.try_pop(), 1.0 + correction);
                     missing += u64::from(lost);
                     // Keep the output clock running and drain the buffer even
                     // while monitoring is off, without touching Windows volume.
-                    let target = if shared.monitor_enabled.load(Ordering::Acquire) {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    // A short gain ramp prevents an audible edge when preview is muted.
                     monitor_gain += (target - monitor_gain) * 0.006;
                     frame.fill(T::from_sample(sample * monitor_gain));
                 }
