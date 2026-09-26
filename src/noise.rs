@@ -12,6 +12,7 @@ pub struct NeuralSuppressor {
     input_pcm: [f32; FRAME_SIZE],
     wet_pcm: [f32; FRAME_SIZE],
     previous_dry: [f32; FRAME_SIZE],
+    neural_only: [f32; FRAME_SIZE], // same-timeline blend before VAD and impact
     primed: bool,
     vad_gain: f32,
     previous_vad: f32,
@@ -25,6 +26,7 @@ impl NeuralSuppressor {
             input_pcm: [0.0; FRAME_SIZE],
             wet_pcm: [0.0; FRAME_SIZE],
             previous_dry: [0.0; FRAME_SIZE],
+            neural_only: [0.0; FRAME_SIZE],
             primed: false,
             vad_gain: 1.0,
             previous_vad: 0.0,
@@ -34,6 +36,11 @@ impl NeuralSuppressor {
 
     pub fn impact_events(&self) -> u64 {
         self.impact.events()
+    }
+
+    /// Diagnostic reference from the last processed frame; never modifies the live route.
+    pub fn neural_only(&self) -> &[f32; FRAME_SIZE] {
+        &self.neural_only
     }
 
     /// Denoise one complete frame. Strength mixes time-aligned dry and wet signals.
@@ -57,6 +64,7 @@ impl NeuralSuppressor {
         let vad = self.model.process_frame(&mut self.wet_pcm, &self.input_pcm);
         if !self.primed {
             output.fill(0.0); // Discard RNNoise's first-frame synthesis artefacts.
+            self.neural_only.fill(0.0);
             self.primed = true;
         } else {
             // At the old 55% setting almost half the unprocessed clap leaked through.
@@ -74,16 +82,23 @@ impl NeuralSuppressor {
             } else {
                 1.0 - 0.93 * gate_strength
             };
+            let previous_gain = self.vad_gain;
             self.vad_gain +=
                 (target - self.vad_gain) * if target > self.vad_gain { 0.50 } else { 0.16 };
             for (index, dst) in output.iter_mut().enumerate() {
                 let dry = self.previous_dry[index];
                 let wet = (self.wet_pcm[index] / 32768.0).clamp(-1.0, 1.0);
-                // Bypass / Off is genuinely dry; do not apply a stale VAD gate.
-                let gate = if mix == 0.0 { 1.0 } else { self.vad_gain };
-                *dst = (dry * (1.0 - mix) + wet * mix)
-                    .mul_add(gate, 0.0)
-                    .clamp(-1.0, 1.0);
+                let neural = (dry * (1.0 - mix) + wet * mix).clamp(-1.0, 1.0);
+                self.neural_only[index] = neural;
+                // Smooth across all 480 samples, not one discontinuous gain change
+                // every 10 ms (which can add a 100-Hz buzz to quiet vowels).
+                let fraction = (index + 1) as f32 / FRAME_SIZE as f32;
+                let gate = if mix == 0.0 {
+                    1.0
+                } else {
+                    previous_gain + (self.vad_gain - previous_gain) * fraction
+                };
+                *dst = (neural * gate).clamp(-1.0, 1.0);
             }
             self.impact.process_frame(
                 &self.previous_dry,

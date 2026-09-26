@@ -75,8 +75,8 @@ function readSavedMicrophone(): SavedMicrophone {
 // Strength controls the local RNNoise neural model, not the legacy gate threshold.
 const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
 type Preview = { running: boolean; neural_enabled: boolean; monitor_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; diagnostic_remaining_ms: number; diagnostic_ready: boolean; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
-type DiagnosticMetrics = { original_rms_dbfs: number; processed_rms_dbfs: number; original_peak_dbfs: number; processed_peak_dbfs: number; rms_change_db: number; peak_change_db: number };
-type DiagnosticAudio = { original_wav: string; processed_wav: string; metrics: DiagnosticMetrics };
+type DiagnosticMetrics = { original_rms_dbfs: number; processed_rms_dbfs: number; original_peak_dbfs: number; processed_peak_dbfs: number; rms_change_db: number; peak_change_db: number; neural_rms_change_db: number; transient_rms_change_db: number };
+type DiagnosticAudio = { original_wav: string; neural_wav: string; transient_wav: string; processed_wav: string; metrics: DiagnosticMetrics };
 const signedDb = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)} dB`;
 
 const emptyPreview: Preview = { running: false, neural_enabled: false, monitor_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, diagnostic_remaining_ms: 0, diagnostic_ready: false, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
@@ -221,6 +221,17 @@ function App() {
     setVoiceSettings(previous => ({ ...previous, [key]: value }));
   }
 
+  function applyVoiceFirst() {
+    // Conservative user-controlled fallback when neural/impact artifacts damage speech.
+    setVoiceSettings({ ...defaultVoiceSettings, makeup_db: 0 });
+    setNoiseStrength(30);
+    setImpactStrength(20);
+    setClarityStrength(10);
+    setClarityCompareOff(false);
+    setBypass(false);
+    setMessage('Voice-first preset applied. Record another A/B comparison to check if the buzz improved.');
+  }
+
   function changeNoiseStrength(value: number) {
     setNoiseStrength(value);
     setBypass(false);
@@ -278,7 +289,7 @@ function App() {
         <button key={name} className={'nav ' + (view === name ? 'active' : '')} onClick={() => setView(name)}>
           <span aria-hidden="true">{['◫', '◉', '⌁', '⚙'][index]}</span>{name}
         </button>)}</nav>
-      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.2</small></div>
+      <div className="asidefoot"><span className="footer-orb"/> ASYGAMES NETWORK<br/><small>AsySounds · v0.1.3</small></div>
     </aside>
     <main>
       <header><div><div className="eyebrow">AUDIO CONTROL CENTER</div><h1>{view}</h1><p>{view === 'Microphone' ? 'Local noise, impact and voice clarity controls.' : 'Build your sound around your workflow.'}</p></div><span className={'status ' + (preview.running ? 'live-status' : '')}><span className="status-dot"/>{preview.running ? (outputMode === 'cable' ? 'PROCESSED MIC ROUTING' : 'LIVE VOICE PREVIEW') : 'LOCAL AUDIO ENGINE'}</span></header>
@@ -307,30 +318,33 @@ function App() {
           <div className="signal-stats"><span><i className={preview.running && !preview.failed ? 'ok-dot' : 'idle-dot'}/>{preview.running ? (preview.failed ? 'Stream issue' : 'Processing locally') : 'Preview inactive'}</span><span>{preview.running ? 'RNNoise ' + preview.inference_us + ' µs / frame' : '48 kHz neural engine'}</span></div>
           <label className="monitor-toggle"><input type="checkbox" checked={monitorEnabled} disabled={!preview.running || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onChange={event => setMonitorEnabled(event.target.checked)}/><span>{outputMode === 'cable' ? 'Send processed microphone to cable' : 'Hear processed audio live'} <small>Off keeps DSP and A/B recording running, but silences the selected output {outputMode === 'cable' ? '(including Discord/OBS input)' : '(headphones)'}.</small></span></label>
           <div className="simple-actions">
-            <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? (outputMode === 'cable' ? 'Stop virtual microphone' : 'Stop listening') : (outputMode === 'cable' ? 'Start processed microphone' : 'Test microphone')}</button>
+            <button className={preview.running ? 'stop' : 'primary'} disabled={busy || (!preview.running && outputMode === 'cable' && !selectedCableRoute)} onClick={() => void togglePreview()}>{preview.running ? (outputMode === 'cable' ? 'Stop virtual microphone' : 'Stop listening') : (outputMode === 'cable' ? 'Start processed microphone' : 'Test microphone')}</button>
             <button className={'compare-button' + (bypass ? ' comparing' : '')} disabled={!preview.running || busy} aria-pressed={bypass} onClick={() => setBypass(current => !current)}>{bypass ? 'Original sound • ON' : 'Compare original sound'}</button>
+            <button className="secondary" type="button" disabled={busy || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onClick={applyVoiceFirst}>Voice-first preset</button>
           </div>
           <small className="simple-disclaimer">{outputMode === 'cable' ? 'Route only to your chosen virtual cable. In Discord/OBS choose its matching recording endpoint; do not also capture the physical mic or you may hear doubled audio. Stop the route before unplugging devices.' : 'Use headphones to prevent feedback. If you still hear clicks when the preview is stopped, the sound comes from another monitor path (headset sidetone, Windows Listen or Sonar), not this filter.'}</small>
         </div>
         <section className="tuning-card diagnostic-card" aria-label="Record an original and processed comparison">
           <div className="tuning-head"><div><span className="eyebrow">REAL MICROPHONE CHECK</span><h3>Compare the same 5-second recording</h3></div><span className="prototype-tag">LOCAL ONLY</span></div>
-          <small>Record only when you choose. Speak and make a click or clap. The app automatically mutes its own live headphone playback during capture; this does not change Windows or hardware sidetone. Both clips use the same microphone input and timeline. Nothing is saved to disk or sent to a server.</small>
+          <small>Record only when you choose. Speak and make a click or clap. Four stages are captured from the same 5-second microphone input: original, neural only, after impact filter, and final voice processing. The selected output is muted during recording; nothing is saved or uploaded automatically.</small>
           <div className="simple-actions">
             <button className="secondary" disabled={!preview.running || preview.failed || bypass || busy || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onClick={() => void beginDiagnostic()}>{preview.diagnostic_remaining_ms > 0 ? 'Recording · ' + Math.ceil(preview.diagnostic_remaining_ms / 1000) + 's' : 'Record 5 seconds'}</button>
             <button className="compare-button" disabled={!preview.running || !preview.diagnostic_ready || busy || diagnosticBusy} onClick={() => void loadDiagnostic()}>{diagnosticBusy ? 'Preparing comparison…' : 'Finish & compare · stop preview'}</button>
           </div>
-          {preview.diagnostic_remaining_ms > 0 && <small>Capturing the unprocessed and processed signals simultaneously…</small>}
-          {preview.diagnostic_ready && <small>Recording ready. Select Finish & compare to stop headphone monitoring and play the two clips.</small>}
+          {preview.diagnostic_remaining_ms > 0 && <small>Capturing all four processing stages on the same timeline…</small>}
+          {preview.diagnostic_ready && <small>Recording ready. Finish & compare stops the route and unlocks all four clips.</small>}
           {diagnostic && !preview.running && <>
             <div className="diagnostic-players">
-              <label>Original microphone<audio controls preload="none" src={diagnostic.original_wav}/></label>
-              <label>AsySounds processed<audio controls preload="none" src={diagnostic.processed_wav}/></label>
+              <label><strong>1 · Original microphone</strong><small>No DSP; reference input.</small><audio controls preload="none" src={diagnostic.original_wav}/><a className="diagnostic-download" href={diagnostic.original_wav} download="AsySounds-original.wav">Save original WAV</a></label>
+              <label><strong>2 · Neural only</strong><small>RNNoise blend without the residual gate, impact filter, compressor or EQ. RMS {signedDb(diagnostic.metrics.neural_rms_change_db)}.</small><audio controls preload="none" src={diagnostic.neural_wav}/><a className="diagnostic-download" href={diagnostic.neural_wav} download="AsySounds-neural.wav">Save neural WAV</a></label>
+              <label><strong>3 · After impact filter</strong><small>Neural + residual gate + clap/click suppression. RMS {signedDb(diagnostic.metrics.transient_rms_change_db)}.</small><audio controls preload="none" src={diagnostic.transient_wav}/><a className="diagnostic-download" href={diagnostic.transient_wav} download="AsySounds-impact.wav">Save impact WAV</a></label>
+              <label><strong>4 · Final processed</strong><small>Full signal including compressor and clarity EQ. RMS {signedDb(diagnostic.metrics.rms_change_db)}.</small><audio controls preload="none" src={diagnostic.processed_wav}/><a className="diagnostic-download" href={diagnostic.processed_wav} download="AsySounds-final.wav">Save final WAV</a></label>
             </div>
             <div className="diagnostic-metrics" aria-label="Measured levels for the five-second A/B recording">
               <div><small>AVERAGE LEVEL (RMS)</small><strong>{signedDb(diagnostic.metrics.rms_change_db)}</strong><span>Original {diagnostic.metrics.original_rms_dbfs.toFixed(1)} dBFS · Processed {diagnostic.metrics.processed_rms_dbfs.toFixed(1)} dBFS</span></div>
               <div><small>HIGHEST PEAK</small><strong>{signedDb(diagnostic.metrics.peak_change_db)}</strong><span>Original {diagnostic.metrics.original_peak_dbfs.toFixed(1)} dBFS · Processed {diagnostic.metrics.processed_peak_dbfs.toFixed(1)} dBFS</span></div>
             </div>
-            <small>Negative dB means the processed clip is quieter overall. These are whole-clip signal levels, not a noise-removal score: listen for remaining clicks and any lost syllables.</small>
+            <small>Listen in order. If track 2 already buzzes, investigate neural processing. If only track 3 buzzes, inspect VAD/impact attenuation. If only track 4 buzzes, inspect compressor/EQ. Differences are whole-clip levels, not quality scores. Use Save WAV only when you choose to share a recording.</small>
           </>}
           <small>If the processed clip differs but you still hear the original live, check hardware sidetone, Windows “Listen to this device”, or Sonar monitoring. A virtual cable output works only when a matching driver is installed and selected in the destination app.</small>
         </section>
@@ -342,7 +356,7 @@ function App() {
           <summary>Advanced settings <span>Optional</span></summary>
           <div className="advanced-content">
             <p>Fine-tune only if you want to. These controls apply to the active processed stream.</p>
-            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setImpactStrength(defaultImpactStrength); setClarityStrength(defaultClarityStrength); setClarityCompareOff(false); setBypass(false);}}>Reset settings</button></div>
+            <div className="controls-heading"><h3>Voice processing</h3><button className="secondary" onClick={applyVoiceFirst}>Voice-first preset</button><button className="secondary" onClick={() => {setVoiceSettings(defaultVoiceSettings); setNoiseStrength(defaultNoiseStrength); setImpactStrength(defaultImpactStrength); setClarityStrength(defaultClarityStrength); setClarityCompareOff(false); setBypass(false);}}>Reset settings</button></div>
             <div className="voice-controls">
               {([
                 ['high_pass_hz', 'High-pass filter', 20, 250, 5, 'Hz'],

@@ -122,6 +122,7 @@ impl ImpactSuppressor {
             narrow_click || broadband
         };
         let intensity = (f32::from(strength.min(100)) / 100.0).sqrt();
+        let previous_gain = self.gain;
         if bypass || strength == 0 {
             self.hold = 0;
             self.gain = 1.0;
@@ -161,23 +162,28 @@ impl ImpactSuppressor {
             return;
         }
         let local_click = impact && narrow_click && self.speech_hangover > 0;
-        if local_click {
-            let click_floor = 1.0 - 0.985 * intensity;
-            for (index, sample) in output.iter_mut().enumerate() {
+        let fade_samples = if self.gain < previous_gain {
+            24
+        } else {
+            FRAME_SIZE
+        };
+        for (index, sample) in output.iter_mut().enumerate() {
+            // Frame-wise gain steps can create a 100-Hz buzz on voiced audio.
+            // Fast attack suppresses the transient; slow release protects syllables.
+            let fraction = ((index + 1) as f32 / fade_samples as f32).min(1.0);
+            let smooth_gain = previous_gain + (self.gain - previous_gain) * fraction;
+            let local = if local_click {
                 let distance = index.abs_diff(peak_at);
-                let local = if distance < CLICK_RADIUS {
-                    // Smooth envelope avoids a second audible click at edges.
+                if distance < CLICK_RADIUS {
                     let fade = (distance as f32 / CLICK_RADIUS as f32).powi(2);
-                    click_floor + (1.0 - click_floor) * fade
+                    1.0 - 0.985 * intensity * (1.0 - fade)
                 } else {
                     1.0
-                };
-                *sample = (*sample * local.min(self.gain)).clamp(-1.0, 1.0);
-            }
-        } else {
-            for sample in output {
-                *sample = (*sample * self.gain).clamp(-1.0, 1.0);
-            }
+                }
+            } else {
+                1.0
+            };
+            *sample = (*sample * local.min(smooth_gain)).clamp(-1.0, 1.0);
         }
     }
 }
@@ -323,6 +329,29 @@ mod tests {
         assert!((output[30] - input[30]).abs() < 1e-6);
         assert!((output[460] - input[460]).abs() < 1e-6);
     }
+    #[test]
+    fn impact_release_is_smooth_across_audio_frame_boundaries() {
+        let mut filter = ImpactSuppressor::new();
+        let impact = clap();
+        let mut output = impact;
+        filter.process_frame(&impact, &mut output, 0.05, 100, false);
+        // The gain is held briefly, then recovers. A hard per-frame step
+        // would exceed this bound on a constant low-level signal.
+        let steady = [0.10_f32; FRAME_SIZE];
+        let mut previous_last: Option<f32> = None;
+        for _ in 0..20 {
+            let mut processed = steady;
+            filter.process_frame(&steady, &mut processed, 0.05, 100, false);
+            if let Some(last) = previous_last {
+                assert!(
+                    (processed[0] - last).abs() < 0.003,
+                    "gain change introduced a discontinuity between frames"
+                );
+            }
+            previous_last = Some(processed[FRAME_SIZE - 1]);
+        }
+    }
+
     #[test]
     fn bypass_and_zero_preserve_audio() {
         let mut filter = ImpactSuppressor::new();

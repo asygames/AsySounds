@@ -38,8 +38,18 @@ const DIAGNOSTIC_FRAMES: usize = 500; // 5 seconds, 48 kHz, 10 ms frames.
 struct DiagnosticCapture {
     remaining_frames: usize,
     original: Vec<i16>,
+    neural: Vec<i16>,
+    transient: Vec<i16>,
     processed: Vec<i16>,
     ready: bool,
+}
+
+/// All four tracks share the identical 48 kHz timeline and capture window.
+pub struct DiagnosticTracks {
+    pub original: Vec<i16>,
+    pub neural: Vec<i16>,
+    pub transient: Vec<i16>,
+    pub processed: Vec<i16>,
 }
 
 #[inline]
@@ -312,6 +322,8 @@ impl NeuralVoiceMonitor {
         *diagnostic = DiagnosticCapture {
             remaining_frames: DIAGNOSTIC_FRAMES,
             original: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
+            neural: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
+            transient: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
             processed: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
             ready: false,
         };
@@ -325,16 +337,18 @@ impl NeuralVoiceMonitor {
             .unwrap_or((0, false))
     }
 
-    pub fn take_diagnostic(&self) -> Result<(Vec<i16>, Vec<i16>), String> {
+    pub fn take_diagnostic(&self) -> Result<DiagnosticTracks, String> {
         let mut state = self.diagnostic.lock().map_err(|_| "Recorder unavailable")?;
         if !state.ready || state.remaining_frames != 0 {
             return Err("The five-second comparison is not ready".into());
         }
         state.ready = false;
-        Ok((
-            std::mem::take(&mut state.original),
-            std::mem::take(&mut state.processed),
-        ))
+        Ok(DiagnosticTracks {
+            original: std::mem::take(&mut state.original),
+            neural: std::mem::take(&mut state.neural),
+            transient: std::mem::take(&mut state.transient),
+            processed: std::mem::take(&mut state.processed),
+        })
     }
 
     pub fn stats(&self) -> MonitorStats {
@@ -451,6 +465,8 @@ fn worker_loop(
         shared
             .impact_events
             .store(noise.impact_events(), Ordering::Relaxed);
+        // Snapshot after RNNoise/VAD/impact, before the voice compressor and EQ.
+        let transient = filtered;
         if bypass_previous != controls_now.bypass {
             voice.reset();
             clarity.reset();
@@ -470,6 +486,9 @@ fn worker_loop(
             && clip.remaining_frames > 0
         {
             clip.original.extend(aligned_raw.iter().map(|&x| pcm16(x)));
+            clip.neural
+                .extend(noise.neural_only().iter().map(|&x| pcm16(x)));
+            clip.transient.extend(transient.iter().map(|&x| pcm16(x)));
             clip.processed.extend(filtered.iter().map(|&x| pcm16(x)));
             clip.remaining_frames -= 1;
             if clip.remaining_frames == 0 {

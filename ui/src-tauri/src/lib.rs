@@ -120,6 +120,8 @@ struct PreviewStatus {
 #[derive(Serialize)]
 struct DiagnosticAudio {
     original_wav: String,
+    neural_wav: String,
+    transient_wav: String,
     processed_wav: String,
     metrics: DiagnosticMetrics,
 }
@@ -133,6 +135,8 @@ struct DiagnosticMetrics {
     processed_peak_dbfs: f32,
     rms_change_db: f32,
     peak_change_db: f32,
+    neural_rms_change_db: f32,
+    transient_rms_change_db: f32,
 }
 
 fn pcm16_levels(samples: &[i16]) -> (f32, f32) {
@@ -166,6 +170,8 @@ fn diagnostic_metrics(original: &[i16], processed: &[i16]) -> DiagnosticMetrics 
         processed_peak_dbfs,
         rms_change_db: processed_rms_dbfs - original_rms_dbfs,
         peak_change_db: processed_peak_dbfs - original_peak_dbfs,
+        neural_rms_change_db: 0.0,
+        transient_rms_change_db: 0.0,
     }
 }
 
@@ -208,17 +214,29 @@ fn take_diagnostic(state: State<'_, PreviewState>) -> Result<DiagnosticAudio, St
         .0
         .lock()
         .map_err(|_| "Preview state unavailable".to_owned())?;
-    let (original, processed) = guard
+    let tracks = guard
         .as_ref()
         .ok_or_else(|| "Start microphone preview first".to_owned())?
         .take_diagnostic()?;
-    if original.len() != processed.len() {
+    let length = tracks.original.len();
+    if length != 240_000
+        || tracks.neural.len() != length
+        || tracks.transient.len() != length
+        || tracks.processed.len() != length
+    {
         return Err("Diagnostic signals were not time-aligned".into());
     }
+    let mut metrics = diagnostic_metrics(&tracks.original, &tracks.processed);
+    metrics.neural_rms_change_db =
+        diagnostic_metrics(&tracks.original, &tracks.neural).rms_change_db;
+    metrics.transient_rms_change_db =
+        diagnostic_metrics(&tracks.original, &tracks.transient).rms_change_db;
     Ok(DiagnosticAudio {
-        metrics: diagnostic_metrics(&original, &processed),
-        original_wav: wav_data_url(&original),
-        processed_wav: wav_data_url(&processed),
+        metrics,
+        original_wav: wav_data_url(&tracks.original),
+        neural_wav: wav_data_url(&tracks.neural),
+        transient_wav: wav_data_url(&tracks.transient),
+        processed_wav: wav_data_url(&tracks.processed),
     })
 }
 
