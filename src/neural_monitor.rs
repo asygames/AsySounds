@@ -61,6 +61,7 @@ struct Shared {
     underflows: AtomicU64,
     device_xruns: AtomicU64,
     impact_events: AtomicU64,
+    monitor_enabled: AtomicBool,
     failed: AtomicBool,
     error: Mutex<Option<String>>,
 }
@@ -78,6 +79,7 @@ pub struct NeuralVoiceMonitor {
 }
 
 impl NeuralVoiceMonitor {
+    #[allow(clippy::too_many_arguments)] // Explicit independent user-controlled DSP and monitor settings.
     pub fn start(
         input_name: &str,
         output_name: &str,
@@ -86,6 +88,7 @@ impl NeuralVoiceMonitor {
         impact_strength: u8,
         clarity_strength: u8,
         bypass: bool,
+        monitor_enabled: bool,
     ) -> Result<Self, String> {
         let host = cpal::default_host();
         let input = exact_device(host.input_devices().map_err(|e| e.to_string())?, input_name)?;
@@ -131,6 +134,7 @@ impl NeuralVoiceMonitor {
             underflows: AtomicU64::new(0),
             device_xruns: AtomicU64::new(0),
             impact_events: AtomicU64::new(0),
+            monitor_enabled: AtomicBool::new(monitor_enabled),
             failed: AtomicBool::new(false),
             error: Mutex::new(None),
         });
@@ -280,6 +284,18 @@ impl NeuralVoiceMonitor {
         }
     }
 
+    /// Mutes only the preview output; input capture, DSP and A/B recording continue.
+    /// The callback keeps draining the ring, so unmuting never plays stale audio.
+    pub fn set_monitor_enabled(&self, enabled: bool) {
+        self.shared
+            .monitor_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub fn monitor_enabled(&self) -> bool {
+        self.shared.monitor_enabled.load(Ordering::Acquire)
+    }
+
     /// Records both sides of the same stream only after an explicit UI action.
     /// Audio stays in memory and is never saved or transmitted by the core.
     pub fn begin_diagnostic(&self) -> Result<(), String> {
@@ -290,6 +306,9 @@ impl NeuralVoiceMonitor {
         if diagnostic.remaining_frames != 0 {
             return Err("A comparison is already recording".into());
         }
+        // Avoid the test playback leaking into the room or adding a second
+        // sidetone path while capturing the original and processed signals.
+        self.set_monitor_enabled(false);
         *diagnostic = DiagnosticCapture {
             remaining_frames: DIAGNOSTIC_FRAMES,
             original: Vec::with_capacity(DIAGNOSTIC_FRAMES * FRAME_SIZE),
@@ -534,6 +553,11 @@ where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
     let error_stats = Arc::clone(&shared);
+    let mut monitor_gain = if shared.monitor_enabled.load(Ordering::Acquire) {
+        1.0_f32
+    } else {
+        0.0_f32
+    };
     device
         .build_output_stream(
             config,
@@ -549,7 +573,16 @@ where
                 for frame in data.chunks_exact_mut(channels) {
                     let (sample, lost) = resampler.next(|| consumer.try_pop(), 1.0 + correction);
                     missing += u64::from(lost);
-                    frame.fill(T::from_sample(sample));
+                    // Keep the output clock running and drain the buffer even
+                    // while monitoring is off, without touching Windows volume.
+                    let target = if shared.monitor_enabled.load(Ordering::Acquire) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    // A short gain ramp prevents an audible edge when preview is muted.
+                    monitor_gain += (target - monitor_gain) * 0.006;
+                    frame.fill(T::from_sample(sample * monitor_gain));
                 }
                 if missing != 0 {
                     shared.underflows.fetch_add(missing, Ordering::Relaxed);

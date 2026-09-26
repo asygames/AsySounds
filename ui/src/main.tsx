@@ -70,9 +70,12 @@ function readSavedMicrophone(): SavedMicrophone {
 }
 // Strength controls the local RNNoise neural model, not the legacy gate threshold.
 const strengthLabel = (strength: number) => strength === 0 ? 'Off' : strength < 34 ? 'Light' : strength < 70 ? 'Balanced' : strength < 86 ? 'Strong' : 'Maximum';
-type Preview = { running: boolean; neural_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; diagnostic_remaining_ms: number; diagnostic_ready: boolean; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
-type DiagnosticAudio = { original_wav: string; processed_wav: string };
-const emptyPreview: Preview = { running: false, neural_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, diagnostic_remaining_ms: 0, diagnostic_ready: false, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
+type Preview = { running: boolean; neural_enabled: boolean; monitor_enabled: boolean; inference_us: number; voice_probability: number; impact_events: number; diagnostic_remaining_ms: number; diagnostic_ready: boolean; peak: number; raw_peak: number; buffered_ms: number; overflow_samples: number; underflow_samples: number; device_xruns: number; failed: boolean; sample_rate: number; output_sample_rate: number; error: string | null };
+type DiagnosticMetrics = { original_rms_dbfs: number; processed_rms_dbfs: number; original_peak_dbfs: number; processed_peak_dbfs: number; rms_change_db: number; peak_change_db: number };
+type DiagnosticAudio = { original_wav: string; processed_wav: string; metrics: DiagnosticMetrics };
+const signedDb = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)} dB`;
+
+const emptyPreview: Preview = { running: false, neural_enabled: false, monitor_enabled: false, inference_us: 0, voice_probability: 0, impact_events: 0, diagnostic_remaining_ms: 0, diagnostic_ready: false, peak: 0, raw_peak: 0, buffered_ms: 0, overflow_samples: 0, underflow_samples: 0, device_xruns: 0, failed: false, sample_rate: 0, output_sample_rate: 0, error: null };
 const channelNames = ['Game', 'Chat', 'Media', 'Aux', 'Microphone'];
 const channelIcons = ['🎮', '💬', '♫', '◈', '🎙'];
 
@@ -91,6 +94,8 @@ function App() {
   const [impactStrength, setImpactStrength] = useState(savedMicrophone.impactStrength);
   const [clarityStrength, setClarityStrength] = useState(savedMicrophone.clarityStrength);
   const [bypass, setBypass] = useState(false);
+  // Session-only; a muted monitor still processes/records the microphone.
+  const [monitorEnabled, setMonitorEnabled] = useState(true);
   // A/B comparison disables only the presence EQ, not RNNoise or impact suppression.
   const [clarityCompareOff, setClarityCompareOff] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -176,6 +181,11 @@ function App() {
     return () => window.clearInterval(timer);
   }, [preview.running]);
 
+  useEffect(() => {
+    if (!preview.running) return;
+    void invoke('set_monitor_enabled', { enabled: monitorEnabled }).catch(error => setMessage(String(error)));
+  }, [monitorEnabled, preview.running]);
+
   // Publish changes at most once per 90 ms; Rust applies them at a block boundary.
   useEffect(() => {
     if (!preview.running) return;
@@ -199,6 +209,8 @@ function App() {
     setDiagnosticBusy(true);
     try {
       await invoke('begin_diagnostic');
+      // Backend mutes headphone preview before collecting the first frame.
+      setMonitorEnabled(false);
       setDiagnostic(null);
       setMessage('');
     } catch (error) { setMessage(String(error)); }
@@ -226,7 +238,7 @@ function App() {
         setPreview(emptyPreview);
       } else {
         if (!selectedInput || !selectedOutput) { setMessage('Connect a microphone and headphone output, or choose devices manually.'); return; }
-        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength: clarityCompareOff ? 0 : clarityStrength });
+        await invoke('start_preview', { input: selectedInput, output: selectedOutput, settings: voiceSettings, bypass, noiseStrength, impactStrength, clarityStrength: clarityCompareOff ? 0 : clarityStrength, monitorEnabled });
         setPreview(await invoke<Preview>('preview_status'));
       }
       setMessage('');
@@ -265,6 +277,7 @@ function App() {
           <div className="simple-level"><span>Input</span><div className="meter-track"><div style={{width: (preview.running ? Math.min(100, preview.raw_peak * 100) : 0) + '%'}}/></div></div>
           <div className="simple-level"><span>Processed</span><div className="meter-track processed-track"><div style={{width: (preview.running ? Math.min(100, preview.peak * 100) : 0) + '%'}}/></div></div>
           <div className="signal-stats"><span><i className={preview.running && !preview.failed ? 'ok-dot' : 'idle-dot'}/>{preview.running ? (preview.failed ? 'Stream issue' : 'Processing locally') : 'Preview inactive'}</span><span>{preview.running ? 'RNNoise ' + preview.inference_us + ' µs / frame' : '48 kHz neural engine'}</span></div>
+          <label className="monitor-toggle"><input type="checkbox" checked={monitorEnabled} disabled={!preview.running || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onChange={event => setMonitorEnabled(event.target.checked)}/><span>Hear processed audio live <small>Off keeps the DSP and A/B recorder running, but silences headphone playback.</small></span></label>
           <div className="simple-actions">
             <button className={preview.running ? 'stop' : 'primary'} disabled={busy} onClick={() => void togglePreview()}>{preview.running ? 'Stop listening' : 'Test microphone'}</button>
             <button className={'compare-button' + (bypass ? ' comparing' : '')} disabled={!preview.running || busy} aria-pressed={bypass} onClick={() => setBypass(current => !current)}>{bypass ? 'Original sound • ON' : 'Compare original sound'}</button>
@@ -273,17 +286,24 @@ function App() {
         </div>
         <section className="tuning-card diagnostic-card" aria-label="Record an original and processed comparison">
           <div className="tuning-head"><div><span className="eyebrow">REAL MICROPHONE CHECK</span><h3>Compare the same 5-second recording</h3></div><span className="prototype-tag">LOCAL ONLY</span></div>
-          <small>Record only when you choose. Speak and make a click or clap; then stop the live preview before playing the two clips. Both use the exact same microphone input. Nothing is saved to disk or sent to a server.</small>
+          <small>Record only when you choose. Speak and make a click or clap. The app automatically mutes its own live headphone playback during capture; this does not change Windows or hardware sidetone. Both clips use the same microphone input and timeline. Nothing is saved to disk or sent to a server.</small>
           <div className="simple-actions">
             <button className="secondary" disabled={!preview.running || preview.failed || bypass || busy || diagnosticBusy || preview.diagnostic_remaining_ms > 0 || preview.diagnostic_ready} onClick={() => void beginDiagnostic()}>{preview.diagnostic_remaining_ms > 0 ? 'Recording · ' + Math.ceil(preview.diagnostic_remaining_ms / 1000) + 's' : 'Record 5 seconds'}</button>
             <button className="compare-button" disabled={!preview.running || !preview.diagnostic_ready || busy || diagnosticBusy} onClick={() => void loadDiagnostic()}>{diagnosticBusy ? 'Preparing comparison…' : 'Finish & compare · stop preview'}</button>
           </div>
           {preview.diagnostic_remaining_ms > 0 && <small>Capturing the unprocessed and processed signals simultaneously…</small>}
           {preview.diagnostic_ready && <small>Recording ready. Select Finish & compare to stop headphone monitoring and play the two clips.</small>}
-          {diagnostic && !preview.running && <div className="diagnostic-players">
-            <label>Original microphone<audio controls preload="none" src={diagnostic.original_wav}/></label>
-            <label>AsySounds processed<audio controls preload="none" src={diagnostic.processed_wav}/></label>
-          </div>}
+          {diagnostic && !preview.running && <>
+            <div className="diagnostic-players">
+              <label>Original microphone<audio controls preload="none" src={diagnostic.original_wav}/></label>
+              <label>AsySounds processed<audio controls preload="none" src={diagnostic.processed_wav}/></label>
+            </div>
+            <div className="diagnostic-metrics" aria-label="Measured levels for the five-second A/B recording">
+              <div><small>AVERAGE LEVEL (RMS)</small><strong>{signedDb(diagnostic.metrics.rms_change_db)}</strong><span>Original {diagnostic.metrics.original_rms_dbfs.toFixed(1)} dBFS · Processed {diagnostic.metrics.processed_rms_dbfs.toFixed(1)} dBFS</span></div>
+              <div><small>HIGHEST PEAK</small><strong>{signedDb(diagnostic.metrics.peak_change_db)}</strong><span>Original {diagnostic.metrics.original_peak_dbfs.toFixed(1)} dBFS · Processed {diagnostic.metrics.processed_peak_dbfs.toFixed(1)} dBFS</span></div>
+            </div>
+            <small>Negative dB means the processed clip is quieter overall. These are whole-clip signal levels, not a noise-removal score: listen for remaining clicks and any lost syllables.</small>
+          </>}
           <small>If both clips differ but you still hear the original sound live, check hardware sidetone, Windows “Listen to this device”, or Sonar monitoring. This is still a preview, not a virtual microphone for Discord/OBS.</small>
         </section>
         <section className="voice-tuning" aria-label="Voice cleanup and clarity">

@@ -83,6 +83,7 @@ impl From<PreviewSettings> for VoiceSettings {
 struct PreviewStatus {
     running: bool,
     neural_enabled: bool,
+    monitor_enabled: bool,
     inference_us: u32,
     voice_probability: f32,
     impact_events: u64,
@@ -105,6 +106,52 @@ struct PreviewStatus {
 struct DiagnosticAudio {
     original_wav: String,
     processed_wav: String,
+    metrics: DiagnosticMetrics,
+}
+
+/// Paired level measurements, not a subjective quality or noise-removal score.
+#[derive(Serialize)]
+struct DiagnosticMetrics {
+    original_rms_dbfs: f32,
+    processed_rms_dbfs: f32,
+    original_peak_dbfs: f32,
+    processed_peak_dbfs: f32,
+    rms_change_db: f32,
+    peak_change_db: f32,
+}
+
+fn pcm16_levels(samples: &[i16]) -> (f32, f32) {
+    if samples.is_empty() {
+        return (-96.0, -96.0);
+    }
+    let sum: f64 = samples
+        .iter()
+        .map(|&x| (f64::from(x) / 32768.0).powi(2))
+        .sum();
+    let peak = samples
+        .iter()
+        .map(|&x| i32::from(x).abs())
+        .max()
+        .unwrap_or(0) as f64
+        / 32768.0;
+    let rms = (sum / samples.len() as f64).sqrt();
+    (
+        (20.0 * rms.max(1e-6).log10()).max(-96.0) as f32,
+        (20.0 * peak.max(1e-6).log10()).max(-96.0) as f32,
+    )
+}
+
+fn diagnostic_metrics(original: &[i16], processed: &[i16]) -> DiagnosticMetrics {
+    let (original_rms_dbfs, original_peak_dbfs) = pcm16_levels(original);
+    let (processed_rms_dbfs, processed_peak_dbfs) = pcm16_levels(processed);
+    DiagnosticMetrics {
+        original_rms_dbfs,
+        processed_rms_dbfs,
+        original_peak_dbfs,
+        processed_peak_dbfs,
+        rms_change_db: processed_rms_dbfs - original_rms_dbfs,
+        peak_change_db: processed_peak_dbfs - original_peak_dbfs,
+    }
 }
 
 fn wav_data_url(samples: &[i16]) -> String {
@@ -150,7 +197,11 @@ fn take_diagnostic(state: State<'_, PreviewState>) -> Result<DiagnosticAudio, St
         .as_ref()
         .ok_or_else(|| "Start microphone preview first".to_owned())?
         .take_diagnostic()?;
+    if original.len() != processed.len() {
+        return Err("Diagnostic signals were not time-aligned".into());
+    }
     Ok(DiagnosticAudio {
+        metrics: diagnostic_metrics(&original, &processed),
         original_wav: wav_data_url(&original),
         processed_wav: wav_data_url(&processed),
     })
@@ -178,6 +229,7 @@ fn start_preview(
     noise_strength: u8,
     impact_strength: u8,
     clarity_strength: u8,
+    monitor_enabled: bool,
     state: State<'_, PreviewState>,
 ) -> Result<(), String> {
     let mut guard = state
@@ -195,6 +247,7 @@ fn start_preview(
         impact_strength,
         clarity_strength,
         bypass,
+        monitor_enabled,
     )?;
     *guard = Some(monitor);
     Ok(())
@@ -226,6 +279,18 @@ fn update_preview_settings(
 }
 
 #[tauri::command]
+fn set_monitor_enabled(enabled: bool, state: State<'_, PreviewState>) -> Result<(), String> {
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "Preview state unavailable".to_owned())?;
+    if let Some(monitor) = guard.as_ref() {
+        monitor.set_monitor_enabled(enabled);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn stop_preview(state: State<'_, PreviewState>) -> Result<(), String> {
     let monitor = state
         .0
@@ -251,6 +316,7 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
             PreviewStatus {
                 running: true,
                 neural_enabled: true,
+                monitor_enabled: monitor.monitor_enabled(),
                 inference_us: monitor.inference_us(),
                 voice_probability: monitor.voice_probability(),
                 impact_events: monitor.impact_events(),
@@ -271,6 +337,7 @@ fn preview_status(state: State<'_, PreviewState>) -> Result<PreviewStatus, Strin
         None => PreviewStatus {
             running: false,
             neural_enabled: false,
+            monitor_enabled: false,
             inference_us: 0,
             voice_probability: 0.0,
             impact_events: 0,
@@ -300,6 +367,7 @@ pub fn run() {
             update_audio_session,
             start_preview,
             update_preview_settings,
+            set_monitor_enabled,
             stop_preview,
             preview_status,
             begin_diagnostic,
@@ -312,6 +380,18 @@ pub fn run() {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_level_metrics_compare_same_time_aligned_signal() {
+        let original = [16384_i16; 480];
+        let processed = [8192_i16; 480];
+        let m = diagnostic_metrics(&original, &processed);
+        assert!((m.original_rms_dbfs + 6.02).abs() < 0.03);
+        assert!((m.rms_change_db + 6.02).abs() < 0.03);
+        assert!((m.peak_change_db + 6.02).abs() < 0.03);
+        let empty = diagnostic_metrics(&[], &[]);
+        assert!(empty.rms_change_db.is_finite());
+    }
 
     #[test]
     fn wav_data_url_contains_valid_mono_pcm16_header_and_samples() {
